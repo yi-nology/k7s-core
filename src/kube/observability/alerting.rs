@@ -529,7 +529,7 @@ pub struct RuleGroup {
 
 /// Fetch alert rules from a Prometheus instance.
 pub async fn prometheus_rules(name: &str) -> AppResult<Vec<RuleGroup>> {
-    let cfg = crate::kube::metrics_config::find(name)?;
+    let cfg = crate::kube::observability::metrics_config::find(name)?;
     let client = build_client()?;
     let url = format!("{}/api/v1/rules", cfg.url);
     let mut req = client.get(&url);

@@ -228,7 +228,7 @@ pub fn validate_export_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kube::sbom::*;
+    use crate::kube::security::sbom::*;
 
     fn make_test_sbom(id: &str, image: &str) -> SbomResult {
         SbomResult {

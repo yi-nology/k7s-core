@@ -16,7 +16,7 @@
 //! UI forces a re-query.
 
 use crate::error::{AppError, AppResult};
-use crate::kube::metrics_config;
+use crate::kube::observability::metrics_config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

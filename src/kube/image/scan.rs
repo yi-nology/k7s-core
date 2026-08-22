@@ -185,9 +185,9 @@ pub fn check_scanners() -> ScanAvailability {
 /// Strip the `https://` / `http://` scheme and any trailing slash from a
 /// registry URL, leaving the bare `host[:port]` that a docker transport needs.
 ///
-/// This mirrors `image_sync::registry_host()` — kept as a re-export so callers
+/// This mirrors `sync::registry_host()` — kept as a re-export so callers
 /// of this module don't need to depend on `image_sync` directly.
-pub use crate::kube::image_sync::registry_host;
+pub use crate::kube::image::sync::registry_host;
 
 /// Build a `docker://` image reference suitable for passing to trivy or grype.
 ///

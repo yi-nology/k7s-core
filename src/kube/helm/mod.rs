@@ -16,8 +16,17 @@
 //!     clear. The app redacts Secret values everywhere else (see
 //!     docs/verification.md), so it redacts them here too rather than leaving a
 //!     hole behind a different door.
+//!
+//! Module layout: marketplace in [`market`], repo/rollback ops in [`ops`].
 
-use super::dto::{Cell, Row, Tone};
+#[cfg(not(target_os = "ios"))]
+pub mod market;
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub mod ops;
+
+
+use crate::kube::dto::{Cell, Row, Tone};
 use k7s_deps::base64::Engine;
 use k7s_deps::flate2::read::GzDecoder;
 use k7s_deps::k8s_openapi::api::core::v1::Secret;

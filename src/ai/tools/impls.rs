@@ -514,14 +514,14 @@ pub async fn hpa_status_impl(
 /// Run the RBAC security audit and return findings.
 pub async fn security_audit_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
-    let report = crate::kube::security_audit::run_audit(client).await?;
+    let report = crate::kube::security::security_audit::run_audit(client).await?;
     k7s_deps::serde_json::to_value(report).map_err(|e| AppError::Other(e.to_string()))
 }
 
 /// Build the RBAC permission matrix and return it.
 pub async fn rbac_permission_matrix_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
-    let matrix = crate::kube::rbac_matrix::build_rbac_matrix(client).await?;
+    let matrix = crate::kube::security::rbac_matrix::build_rbac_matrix(client).await?;
     k7s_deps::serde_json::to_value(matrix).map_err(|e| AppError::Other(e.to_string()))
 }
 
@@ -542,7 +542,7 @@ pub async fn diagnose_pod_impl(
 // ---------------------------------------------------------------------------
 
 /// Raw wire types for metrics.k8s.io responses. These mirror the types in
-/// `mcp::kube_api` and `kube::metrics` but are defined here so the AI module
+/// `mcp::kube_api` and `kube::observability::metrics` but are defined here so the AI module
 /// does not depend on feature-gated code.
 
 #[derive(serde::Deserialize)]
@@ -613,11 +613,11 @@ pub async fn top_nodes_impl(manager: &ClientManager) -> AppResult<k7s_deps::serd
             if let Some(alloc) = &status.allocatable {
                 let cpu = alloc
                     .get("cpu")
-                    .map(|q| crate::kube::metrics::parse_cpu_millis(&q.0))
+                    .map(|q| crate::kube::observability::metrics::parse_cpu_millis(&q.0))
                     .unwrap_or(0);
                 let mem = alloc
                     .get("memory")
-                    .map(|q| crate::kube::metrics::parse_mem_bytes(&q.0))
+                    .map(|q| crate::kube::observability::metrics::parse_mem_bytes(&q.0))
                     .unwrap_or(0);
                 capacity.insert(name, (cpu, mem));
             }
@@ -628,8 +628,8 @@ pub async fn top_nodes_impl(manager: &ClientManager) -> AppResult<k7s_deps::serd
     let mut rows: Vec<k7s_deps::serde_json::Value> = Vec::new();
     for m in &metrics.items {
         let name = m.metadata.name.clone();
-        let cpu = crate::kube::metrics::parse_cpu_millis(&m.usage.cpu);
-        let mem = crate::kube::metrics::parse_mem_bytes(&m.usage.memory);
+        let cpu = crate::kube::observability::metrics::parse_cpu_millis(&m.usage.cpu);
+        let mem = crate::kube::observability::metrics::parse_mem_bytes(&m.usage.memory);
         let (cpu_cap, mem_cap) = capacity.get(&name).copied().unwrap_or((0, 0));
         let cpu_pct = pct(cpu, cpu_cap);
         let mem_pct = pct(mem, mem_cap);
@@ -679,12 +679,12 @@ pub async fn top_pods_impl(
             let cpu: i64 = pm
                 .containers
                 .iter()
-                .map(|c| crate::kube::metrics::parse_cpu_millis(&c.usage.cpu))
+                .map(|c| crate::kube::observability::metrics::parse_cpu_millis(&c.usage.cpu))
                 .sum();
             let mem: i64 = pm
                 .containers
                 .iter()
-                .map(|c| crate::kube::metrics::parse_mem_bytes(&c.usage.memory))
+                .map(|c| crate::kube::observability::metrics::parse_mem_bytes(&c.usage.memory))
                 .sum();
             k7s_deps::serde_json::json!({
                 "namespace": pm.metadata.namespace,

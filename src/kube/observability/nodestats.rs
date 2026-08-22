@@ -15,7 +15,7 @@
 //!
 //! Port-forwarding goes via the kubelet instead, and works.
 
-use super::events;
+use crate::kube::events;
 use super::exporter::{self, NodeSample, Sampler};
 use crate::core::events::EventSink;
 use crate::error::{AppError, AppResult};
@@ -90,7 +90,7 @@ pub async fn run_node_stats(client: Client, sink: EventSink, node: String, every
     // 5s poll.
     let (ready_tx, ready_rx) = oneshot::channel();
     let (err_tx, mut err_rx) = mpsc::channel::<String>(8);
-    let pf = k7s_deps::tokio::spawn(super::portforward::run_port_forward(
+    let pf = k7s_deps::tokio::spawn(crate::kube::portforward::run_port_forward(
         client,
         namespace,
         pod.clone(),

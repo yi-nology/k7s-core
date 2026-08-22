@@ -600,7 +600,7 @@ pub async fn export_chart(
     output_dir: &str,
 ) -> AppResult<PathBuf> {
     let helm =
-        super::helm_ops::which_helm().ok_or_else(|| AppError::Other("helm not found".into()))?;
+        super::ops::which_helm().ok_or_else(|| AppError::Other("helm not found".into()))?;
 
     let output = std::path::PathBuf::from(output_dir);
     std::fs::create_dir_all(&output)

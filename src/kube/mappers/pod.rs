@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::kube::dto::{PodMeta, PodResources};
-use crate::kube::metrics::{parse_cpu_millis, parse_mem_bytes};
+use crate::kube::observability::metrics::{parse_cpu_millis, parse_mem_bytes};
 use k7s_deps::k8s_openapi::api::core::v1::Pod;
 use k7s_deps::kube::ResourceExt;
 

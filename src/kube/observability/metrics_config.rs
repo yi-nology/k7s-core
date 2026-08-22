@@ -7,7 +7,7 @@
 //!      user-managed list, so a Metrics Explorer can choose between the in-cluster
 //!      Prometheus, an external one (corp Prometheus, Grafana Cloud, …), or
 //!      several. Storage is a JSON file under the user config dir, mirroring
-//!      how [`crate::kube::helm_market`] keeps chart repos.
+//!      how [`crate::kube::helm::market`] keeps chart repos.
 //!
 //!   2. **PromQL query.** A single entry point that wraps a Prometheus HTTP API
 //!      request — `query` for an instant value, `query_range` for a window —
@@ -16,7 +16,7 @@
 //!      values as f64) because every millisecond on the response path matters
 //!      when a user is typing into the Explorer.
 //!
-//! Auth: the same bearer-challenge dance as [`crate::kube::imagerepo`], but
+//! Auth: the same bearer-challenge dance as [`crate::kube::image::repo`], but
 //! inlined here to keep the modules independent. We don't refactor it into
 //! a shared helper yet because the two callers do different things after
 //! the auth dance and a premature abstraction would just hide the difference.

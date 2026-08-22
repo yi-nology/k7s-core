@@ -24,7 +24,7 @@
 
 use crate::core::events::EventSink;
 use crate::error::{AppError, AppResult};
-use crate::kube::{imageexport, imagerepo};
+use crate::kube::{image::export, image::repo};
 use serde::Serialize;
 use std::process::Stdio;
 use k7s_deps::tokio::io::{AsyncBufReadExt, BufReader};
@@ -117,7 +117,7 @@ pub async fn check_skopeo() -> SkopeoAvailability {
 /// Strip the `https://` / `http://` scheme and any trailing slash from a
 /// registry URL, leaving the bare `host[:port]` that a docker transport needs.
 ///
-/// `imagerepo::ImageRegistry.url` is stored as `https://registry.example.com`
+/// `repo::ImageRegistry.url` is stored as `https://registry.example.com`
 /// (the UI's convention — it's what the catalog API wants). skopeo's
 /// `docker://` transport takes a bare host, so we canonicalise here.
 pub fn registry_host(url: &str) -> String {
@@ -309,7 +309,7 @@ pub fn dest_reference(host: &str, repo: &str, tag: &str) -> String {
 ///   - `dir:/path/to/unpacked`          — an unpacked image directory
 ///
 /// The destination is resolved from the user's configured registries
-/// (`imagerepo::list_registries`) by `dest_registry` name — this reuses the
+/// (`repo::list_registries`) by `dest_registry` name — this reuses the
 /// stored URL + credentials so the caller never handles secrets directly.
 ///
 /// Streams each stdout/stderr line to the event sink (so a UI can show live
@@ -335,7 +335,7 @@ pub async fn copy_image(
 
     // Resolve the destination registry from the stored configuration. We need
     // the full ImageRegistry (with the decrypted password) to build creds.
-    let reg = imagerepo::list_registries()
+    let reg = repo::list_registries()
         .map_err(|e| AppError::Other(format!("load registries: {e}")))?
         .into_iter()
         .find(|r| r.name == dest_registry)
@@ -529,7 +529,7 @@ pub async fn export_from_registry(
     // Validate the save path before we touch skopeo: the destination is
     // `docker-archive:{save_path}`, i.e. skopeo writes the tar here, so a
     // hostile or malformed path could clobber arbitrary local files.
-    imageexport::validate_save_path(save_path)?;
+    export::validate_save_path(save_path)?;
     let skopeo = which_skopeo().ok_or_else(|| {
         AppError::Other(
             "skopeo CLI not found in PATH — install skopeo \
@@ -538,7 +538,7 @@ pub async fn export_from_registry(
         )
     })?;
 
-    let reg = imagerepo::list_registries()
+    let reg = repo::list_registries()
         .map_err(|e| AppError::Other(format!("load registries: {e}")))?
         .into_iter()
         .find(|r| r.name == registry_name)

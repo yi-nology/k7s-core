@@ -10,7 +10,7 @@
 //! The two share the latest cluster CPU/MEM % via a small mutex so the status
 //! event can include them without re-fetching.
 
-use super::events;
+use crate::kube::events;
 use crate::core::events::EventSink;
 use k7s_deps::k8s_openapi::api::core::v1::Node;
 use k7s_deps::kube::api::{Api, ListParams};

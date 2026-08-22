@@ -20,7 +20,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use k7s_deps::tokio::io::AsyncReadExt;
 
-use crate::kube::{imageimport, nodeshell};
+use crate::kube::{image::import, nodeshell};
 
 /// Result of exporting an image from a node.
 #[derive(Clone, Debug, Serialize)]
@@ -235,7 +235,7 @@ pub async fn list_node_images(client: k7s_deps::kube::Client, node: &str) -> App
         .and_then(|s| s.node_info.as_ref())
         .map(|i| i.container_runtime_version.clone())
         .unwrap_or_default();
-    let runtime = imageimport::detect_runtime(&version)?;
+    let runtime = import::detect_runtime(&version)?;
     let argv = list_command(&runtime)?;
 
     let image = std::env::var("K7S_NODE_SHELL_IMAGE")
@@ -304,7 +304,7 @@ pub async fn export_from_node(
         .and_then(|s| s.node_info.as_ref())
         .map(|i| i.container_runtime_version.clone())
         .unwrap_or_default();
-    let runtime = match imageimport::detect_runtime(&version) {
+    let runtime = match import::detect_runtime(&version) {
         Ok(r) => r,
         Err(e) => {
             return Ok(ExportResult {

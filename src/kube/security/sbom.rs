@@ -125,7 +125,7 @@ pub struct SbomSummary {
 // ---------------------------------------------------------------------------
 
 /// Re-export trivy/grype detection from image_scan module.
-pub use crate::kube::image_scan::{which_grype, which_trivy};
+pub use crate::kube::image::scan::{which_grype, which_trivy};
 
 // ---------------------------------------------------------------------------
 // SBOM generation

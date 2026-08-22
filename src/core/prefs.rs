@@ -92,28 +92,28 @@ pub fn load_prefs_json(data_dir: &Path) -> Option<Prefs> {
 
 /// Poll intervals from prefs, clamped to the same bounds the settings panel
 /// enforces — a hand-edited prefs.json shouldn't be able to hammer the API server.
-pub fn poll_intervals(prefs: &Prefs) -> crate::kube::metrics::PollIntervals {
+pub fn poll_intervals(prefs: &Prefs) -> crate::kube::observability::metrics::PollIntervals {
     let clamp = |v: Option<u64>, default: std::time::Duration| {
         v.map(|s| std::time::Duration::from_secs(s.clamp(5, 300)))
             .unwrap_or(default)
     };
-    crate::kube::metrics::PollIntervals {
+    crate::kube::observability::metrics::PollIntervals {
         metrics: clamp(
             prefs.metrics_interval_secs,
-            crate::kube::metrics::METRICS_INTERVAL,
+            crate::kube::observability::metrics::METRICS_INTERVAL,
         ),
         status: clamp(
             prefs.status_interval_secs,
-            crate::kube::metrics::STATUS_INTERVAL,
+            crate::kube::observability::metrics::STATUS_INTERVAL,
         ),
     }
 }
 
 /// Default poll intervals when prefs aren't readable. Same defaults the Tauri
 /// shell uses before the user touches the settings panel.
-pub fn poll_intervals_default() -> crate::kube::metrics::PollIntervals {
-    crate::kube::metrics::PollIntervals {
-        metrics: crate::kube::metrics::METRICS_INTERVAL,
-        status: crate::kube::metrics::STATUS_INTERVAL,
+pub fn poll_intervals_default() -> crate::kube::observability::metrics::PollIntervals {
+    crate::kube::observability::metrics::PollIntervals {
+        metrics: crate::kube::observability::metrics::METRICS_INTERVAL,
+        status: crate::kube::observability::metrics::STATUS_INTERVAL,
     }
 }

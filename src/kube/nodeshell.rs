@@ -223,7 +223,7 @@ pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90
 
 /// Wait for the debug pod to reach Running, or explain what it's stuck on.
 ///
-/// Shared by `start_node_shell` (interactive) and `imageimport::import_to_node`
+/// Shared by `start_node_shell` (interactive) and `import::import_to_node`
 /// (one-shot). Both need the same "wait, then surface the actionable reason"
 /// behaviour, so it lives with the pod spec rather than in either caller.
 pub async fn await_debug_pod(api: &k7s_deps::kube::Api<Pod>, name: &str) -> crate::error::AppResult<()> {

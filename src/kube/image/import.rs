@@ -8,7 +8,7 @@
 //!
 //! ## How it differs from `image_sync`
 //!
-//! [`image_sync`](crate::kube::image_sync) copies an image into a *private
+//! [`image_sync`](crate::kube::image::sync) copies an image into a *private
 //! registry* via `skopeo` — that needs a registry running in the cluster and
 //! `skopeo` on the host. This module loads the tar *directly into a node's
 //! container runtime* via a privileged debug pod — no registry required, which

@@ -46,7 +46,7 @@ pub struct ArchiveInfo {
 /// We don't stream to an event sink here — inspect is a quick one-shot, unlike
 /// `copy_image` which can run for minutes.
 pub async fn inspect_archive(path: &str) -> AppResult<ArchiveInfo> {
-    let skopeo = crate::kube::image_sync::which_skopeo().ok_or_else(|| {
+    let skopeo = crate::kube::image::sync::which_skopeo().ok_or_else(|| {
         AppError::Other(
             "skopeo CLI not found in PATH — install skopeo \
              (brew install skopeo / apt install skopeo) and retry"

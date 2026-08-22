@@ -1,6 +1,6 @@
 //! AI assistant configuration — load / save / defaults.
 //!
-//! Mirrors the storage pattern of [`crate::kube::metrics_config`]: a single JSON
+//! Mirrors the storage pattern of [`crate::kube::observability::metrics_config`]: a single JSON
 //! file (`ai-config.json`) under the app config dir, written atomically via a
 //! `.tmp` rename. The `api_key` is never stored in plaintext here — it goes
 //! through [`crate::ai::secret`] which encrypts it at rest. This file holds only

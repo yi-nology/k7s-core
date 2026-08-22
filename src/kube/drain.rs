@@ -262,8 +262,8 @@ mod tests {
     /// 429 means a PDB held the eviction back; anything else is a real error.
     #[test]
     fn pdb_block_is_detected_by_status_code() {
-        use k7s_deps::kube::error::ErrorResponse;
-        let too_many = k7s_deps::kube::Error::Api(Box::new(ErrorResponse {
+        use k7s_deps::kube::core::Status;
+        let too_many = k7s_deps::kube::Error::Api(Box::new(Status {
             message: "Cannot evict pod as it would violate the pod's disruption budget.".into(),
             reason: "TooManyRequests".into(),
             code: 429,
@@ -271,7 +271,7 @@ mod tests {
         }));
         assert!(is_pdb_block(&too_many));
 
-        let not_found = k7s_deps::kube::Error::Api(Box::new(ErrorResponse {
+        let not_found = k7s_deps::kube::Error::Api(Box::new(Status {
             message: "pods \"x\" not found".into(),
             reason: "NotFound".into(),
             code: 404,

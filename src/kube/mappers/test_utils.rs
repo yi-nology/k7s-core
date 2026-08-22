@@ -4,6 +4,7 @@ use k7s_deps::kube::core::DynamicObject;
 use proptest::prelude::*;
 
 /// Generate an arbitrary DynamicObject with valid metadata.
+#[allow(dead_code)] // shared proptest strategy for mapper property tests
 pub fn arb_dynamic_object(namespaced: bool) -> impl Strategy<Value = DynamicObject> {
     (
         "[a-z][a-z0-9-]{0,20}",
@@ -34,6 +35,7 @@ pub fn arb_dynamic_object(namespaced: bool) -> impl Strategy<Value = DynamicObje
 }
 
 /// Generate an arbitrary non-empty string for cell text.
+#[allow(dead_code)] // shared proptest strategy for mapper property tests
 pub fn arb_cell_text() -> impl Strategy<Value = String> {
     "[a-zA-Z0-9 .:_/-]{1,50}"
 }

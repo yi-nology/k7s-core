@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manager = Arc::new(ClientManager::new(sink));
     let data_dir = std::env::temp_dir().join("k7s-core-test");
     std::fs::create_dir_all(&data_dir)?;
-    let state = CoreState::new(manager.clone(), data_dir);
+    let _state = CoreState::new(manager.clone(), data_dir);
 
     let result = shell_common::connect_core(&manager, None, None, "dev").await?;
     println!("✅ Connected to {} ({})\n", result.server, result.version);
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("LimitRanges", ResourceKind::Limitranges),
     ];
 
-    println!("{:<35} {:>6}  {}", "RESOURCE KIND", "COUNT", "STATUS");
+    println!("{:<35} {:>6}  STATUS", "RESOURCE KIND", "COUNT");
     println!("{}", "-".repeat(70));
 
     let mut total = 0u32;
@@ -76,11 +76,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (label, kind) in &kinds_to_check {
         let api_resource = kind.api_resource();
-        let api: Api<DynamicObject> = if kind.is_namespaced() {
-            Api::all_with(client.clone(), &api_resource)
-        } else {
-            Api::all_with(client.clone(), &api_resource)
-        };
+        // Api::all_with covers both namespaced and cluster-scoped resources.
+        let api: Api<DynamicObject> = Api::all_with(client.clone(), &api_resource);
 
         match api.list(&ListParams::default()).await {
             Ok(list) => {

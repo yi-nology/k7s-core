@@ -423,7 +423,7 @@ fn finalize_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k7s_deps::futures::StreamExt;
+    
 
     /// Drive the SSE parser end-to-end by feeding it bytes through a mock
     /// reqwest stream isn't trivial without HTTP; instead we unit-test the two
@@ -517,6 +517,6 @@ mod tests {
         // multibyte char in the middle of a *data line* is only decoded once
         // the full event arrives.
         let _ = (chunk1, chunk2); // smoke: splits compile and indices are valid
-        assert_eq!("中".as_bytes().len(), 3);
+        assert_eq!("中".len(), 3);
     }
 }

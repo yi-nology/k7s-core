@@ -949,7 +949,7 @@ fn trim_result(v: k7s_deps::serde_json::Value) -> k7s_deps::serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::llm::{ChatStream, FunctionDef, StreamEvent, StreamItem};
+    use crate::ai::llm::{ChatStream, FunctionDef, StreamEvent};
     use k7s_deps::tokio::sync::oneshot;
     use std::sync::Mutex;
 
@@ -988,11 +988,13 @@ mod tests {
 
     /// A mock EventSink that records emitted events and auto-approves every
     /// pending write (so the gate doesn't block the test).
+    #[allow(dead_code)] // event-capture helper for agent tests
     struct MockSink {
         events: Mutex<Vec<AgentEvent>>,
         cancelled: Mutex<bool>,
     }
 
+    #[allow(dead_code)]
     impl MockSink {
         fn new() -> Self {
             Self {

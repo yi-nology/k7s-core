@@ -1,6 +1,0 @@
-# Local development only: when building k7s-core as the workspace root, use the
-# sibling checkout of k7s-deps instead of the published git rev. Patch sections
-# apply only from the workspace root, so consumers (k7s-android/ios/desktop)
-# still resolve k7s-deps from git.
-[patch."https://github.com/yi-nology/k7s-deps.git"]
-k7s-deps = { path = "../k7s-deps" }

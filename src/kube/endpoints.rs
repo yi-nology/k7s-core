@@ -232,10 +232,12 @@ mod tests {
     #[test]
     fn map_slice_uses_endpoint_port_when_present() {
         let mut s = make_slice("with-port", "default", "svc", 1, 1);
-        s.ports = Some(vec![k7s_deps::k8s_openapi::api::discovery::v1::EndpointPort {
-            port: Some(8080),
-            ..Default::default()
-        }]);
+        s.ports = Some(vec![
+            k7s_deps::k8s_openapi::api::discovery::v1::EndpointPort {
+                port: Some(8080),
+                ..Default::default()
+            },
+        ]);
         let row = map_slice(&s);
         assert_eq!(row.addresses, vec!["10.0.0.0:8080".to_string()]);
     }

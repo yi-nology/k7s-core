@@ -4,8 +4,8 @@
 //! Outputs CycloneDX and SPDX formats.
 
 use k7s_deps::chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use k7s_deps::uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use k7s_deps::tokio::process::Command;
@@ -226,7 +226,10 @@ fn parse_trivy_sbom(
 }
 
 /// Extract components from trivy output.
-fn parse_trivy_components(value: &k7s_deps::serde_json::Value, format: &SbomFormat) -> Vec<SbomComponent> {
+fn parse_trivy_components(
+    value: &k7s_deps::serde_json::Value,
+    format: &SbomFormat,
+) -> Vec<SbomComponent> {
     match format {
         SbomFormat::CycloneDx => value["components"]
             .as_array()
@@ -654,14 +657,18 @@ impl SbomEngine {
         if let Some(ref path) = self.trivy_path {
             match generate_via_trivy(path, image_ref, format, &self.timeout).await {
                 Ok(result) => return Ok(result),
-                Err(e) => k7s_deps::tracing::warn!("trivy SBOM generation failed, falling back: {e}"),
+                Err(e) => {
+                    k7s_deps::tracing::warn!("trivy SBOM generation failed, falling back: {e}")
+                }
             }
         }
         // Tier 2: grype
         if let Some(ref path) = self.grype_path {
             match generate_via_grype(path, image_ref, format).await {
                 Ok(result) => return Ok(result),
-                Err(e) => k7s_deps::tracing::warn!("grype SBOM generation failed, falling back: {e}"),
+                Err(e) => {
+                    k7s_deps::tracing::warn!("grype SBOM generation failed, falling back: {e}")
+                }
             }
         }
         // Tier 3: native fallback

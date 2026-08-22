@@ -8,9 +8,9 @@
 //! Tasks are persisted as JSON under `<data_dir>/ai-cron.json`. The scheduler
 //! runs as a background tokio task managed by [`CronScheduler`].
 
+use k7s_deps::tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use k7s_deps::tokio::sync::Mutex;
 
 /// A scheduled AI task.
 #[derive(Clone, Debug, Serialize, Deserialize)]

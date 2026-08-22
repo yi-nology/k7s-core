@@ -50,7 +50,9 @@ pub fn save(data_dir: Option<&std::path::Path>, key: &str) -> AiResult<()> {
                 Ok(())
             }
             Err(e) => {
-                k7s_deps::tracing::warn!("keychain set_password failed ({e}); falling back to file");
+                k7s_deps::tracing::warn!(
+                    "keychain set_password failed ({e}); falling back to file"
+                );
                 save_to_file(data_dir, key)
             }
         },

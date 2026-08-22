@@ -12,7 +12,9 @@ use crate::core::shell_common;
 use crate::error::{AppError, AppResult};
 use crate::kube::manager::{ClientManager, ConnectionInfo};
 use crate::kube::ResourceKind;
-use k7s_deps::kube::api::{Api, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams};
+use k7s_deps::kube::api::{
+    Api, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
+};
 use k7s_deps::kube::ResourceExt;
 use std::collections::HashMap;
 
@@ -151,7 +153,9 @@ pub async fn get_pod_logs_impl(
 }
 
 /// Cluster health snapshot.
-pub async fn get_cluster_health_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
+pub async fn get_cluster_health_impl(
+    manager: &ClientManager,
+) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let nodes: k7s_deps::kube::api::ObjectList<k7s_deps::k8s_openapi::api::core::v1::Node> =
         Api::all(client.clone()).list(&Default::default()).await?;
@@ -259,7 +263,9 @@ pub async fn restart_workload_impl(
     let now = k7s_deps::chrono::Utc::now().to_rfc3339();
     let patch = Patch::Merge(crate::kube::restart::restart_patch(&now));
     api.patch(name, &PatchParams::default(), &patch).await?;
-    Ok(k7s_deps::serde_json::json!({ "restarted": true, "kind": kind, "namespace": namespace, "name": name }))
+    Ok(
+        k7s_deps::serde_json::json!({ "restarted": true, "kind": kind, "namespace": namespace, "name": name }),
+    )
 }
 
 /// Delete a resource.
@@ -272,7 +278,9 @@ pub async fn delete_resource_impl(
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let (api, _) = shell_common::dynamic_api(client, kind, namespace, manager).await?;
     api.delete(name, &DeleteParams::default()).await?;
-    Ok(k7s_deps::serde_json::json!({ "deleted": true, "kind": kind, "namespace": namespace, "name": name }))
+    Ok(
+        k7s_deps::serde_json::json!({ "deleted": true, "kind": kind, "namespace": namespace, "name": name }),
+    )
 }
 
 /// Apply a YAML manifest.
@@ -341,12 +349,13 @@ pub async fn diagnose_unhealthy_impl(
     }
 
     // Pods.
-    let pods: k7s_deps::kube::api::ObjectList<k7s_deps::k8s_openapi::api::core::v1::Pod> = match namespace {
-        Some(ns) => Api::namespaced(client.clone(), ns),
-        None => Api::all(client.clone()),
-    }
-    .list(&Default::default())
-    .await?;
+    let pods: k7s_deps::kube::api::ObjectList<k7s_deps::k8s_openapi::api::core::v1::Pod> =
+        match namespace {
+            Some(ns) => Api::namespaced(client.clone(), ns),
+            None => Api::all(client.clone()),
+        }
+        .list(&Default::default())
+        .await?;
     for p in pods {
         let ns = p.metadata.namespace.clone().unwrap_or_default();
         let pod_name = p.name_any();
@@ -412,12 +421,13 @@ pub async fn diagnose_unhealthy_impl(
     }
 
     // Deployments.
-    let deps: k7s_deps::kube::api::ObjectList<k7s_deps::k8s_openapi::api::apps::v1::Deployment> = match namespace {
-        Some(ns) => Api::namespaced(client.clone(), ns),
-        None => Api::all(client),
-    }
-    .list(&Default::default())
-    .await?;
+    let deps: k7s_deps::kube::api::ObjectList<k7s_deps::k8s_openapi::api::apps::v1::Deployment> =
+        match namespace {
+            Some(ns) => Api::namespaced(client.clone(), ns),
+            None => Api::all(client),
+        }
+        .list(&Default::default())
+        .await?;
     for d in deps {
         let ns = d.metadata.namespace.clone().unwrap_or_default();
         let full = if ns.is_empty() {
@@ -512,14 +522,18 @@ pub async fn hpa_status_impl(
 // ---------------------------------------------------------------------------
 
 /// Run the RBAC security audit and return findings.
-pub async fn security_audit_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
+pub async fn security_audit_impl(
+    manager: &ClientManager,
+) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let report = crate::kube::security::security_audit::run_audit(client).await?;
     k7s_deps::serde_json::to_value(report).map_err(|e| AppError::Other(e.to_string()))
 }
 
 /// Build the RBAC permission matrix and return it.
-pub async fn rbac_permission_matrix_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
+pub async fn rbac_permission_matrix_impl(
+    manager: &ClientManager,
+) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let matrix = crate::kube::security::rbac_matrix::build_rbac_matrix(client).await?;
     k7s_deps::serde_json::to_value(matrix).map_err(|e| AppError::Other(e.to_string()))
@@ -706,14 +720,18 @@ pub async fn top_pods_impl(
 
 /// Generate a cluster capacity report with node usage, namespace aggregation,
 /// and scaling recommendations.
-pub async fn capacity_report_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
+pub async fn capacity_report_impl(
+    manager: &ClientManager,
+) -> AppResult<k7s_deps::serde_json::Value> {
     // Get node metrics.
     let nodes_json = top_nodes_impl(manager).await?;
-    let nodes: Vec<k7s_deps::serde_json::Value> = k7s_deps::serde_json::from_value(nodes_json).unwrap_or_default();
+    let nodes: Vec<k7s_deps::serde_json::Value> =
+        k7s_deps::serde_json::from_value(nodes_json).unwrap_or_default();
 
     // Get pod metrics.
     let pods_json = top_pods_impl(manager, None).await?;
-    let pods: Vec<k7s_deps::serde_json::Value> = k7s_deps::serde_json::from_value(pods_json).unwrap_or_default();
+    let pods: Vec<k7s_deps::serde_json::Value> =
+        k7s_deps::serde_json::from_value(pods_json).unwrap_or_default();
 
     // Cluster totals.
     let total_cpu: i64 = nodes
@@ -830,7 +848,9 @@ pub async fn capacity_report_impl(manager: &ClientManager) -> AppResult<k7s_deps
 /// Returns the current cluster context, available namespaces, and common
 /// kubectl command templates. The LLM uses this to build accurate,
 /// context-aware kubectl commands the user can copy-paste.
-pub async fn kubectl_context_impl(manager: &ClientManager) -> AppResult<k7s_deps::serde_json::Value> {
+pub async fn kubectl_context_impl(
+    manager: &ClientManager,
+) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
 
     // Current context and server version from the connection info.
@@ -841,7 +861,8 @@ pub async fn kubectl_context_impl(manager: &ClientManager) -> AppResult<k7s_deps
     });
 
     // List all namespaces.
-    let ns_api: k7s_deps::kube::Api<k7s_deps::k8s_openapi::api::core::v1::Namespace> = k7s_deps::kube::Api::all(client);
+    let ns_api: k7s_deps::kube::Api<k7s_deps::k8s_openapi::api::core::v1::Namespace> =
+        k7s_deps::kube::Api::all(client);
     let ns_list = ns_api.list(&ListParams::default()).await?;
     let namespaces: Vec<String> = ns_list
         .items

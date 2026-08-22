@@ -626,9 +626,10 @@ mod tests {
     #[test]
     fn volume_source_names_inline_backings() {
         use k7s_deps::serde_json::json;
-        let vol = |body: k7s_deps::serde_json::Value| -> k7s_deps::k8s_openapi::api::core::v1::Volume {
-            k7s_deps::serde_json::from_value(body).unwrap()
-        };
+        let vol =
+            |body: k7s_deps::serde_json::Value| -> k7s_deps::k8s_openapi::api::core::v1::Volume {
+                k7s_deps::serde_json::from_value(body).unwrap()
+            };
 
         let (src, nav) = pod::volume_source(
             &vol(json!({ "name": "cfg", "configMap": { "name": "app-config" } })),

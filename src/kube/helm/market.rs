@@ -162,8 +162,7 @@ fn config_dir() -> Option<PathBuf> {
     // hand-roll platform paths in commands.rs; doing the same here keeps the
     // project free of an extra dependency for a single call.
     if cfg!(any(target_os = "macos", target_os = "ios")) {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Library/Application Support/k7s"))
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/k7s"))
     } else if cfg!(any(target_os = "linux", target_os = "android")) {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(|p| PathBuf::from(p).join("k7s"))
@@ -177,8 +176,7 @@ fn config_dir() -> Option<PathBuf> {
 
 pub(crate) fn cache_dir() -> Option<PathBuf> {
     if cfg!(any(target_os = "macos", target_os = "ios")) {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Library/Caches/k7s/helm-index"))
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/k7s/helm-index"))
     } else if cfg!(any(target_os = "linux", target_os = "android")) {
         std::env::var_os("XDG_CACHE_HOME")
             .map(|p| PathBuf::from(p).join("k7s/helm-index"))
@@ -559,7 +557,8 @@ async fn fetch_index(url: &str) -> AppResult<HelmIndex> {
         .text()
         .await
         .map_err(|e| AppError::Other(format!("read body {index_url}: {e}")))?;
-    k7s_deps::yaml_serde::from_str(&text).map_err(|e| AppError::Other(format!("parse index.yaml: {e}")))
+    k7s_deps::yaml_serde::from_str(&text)
+        .map_err(|e| AppError::Other(format!("parse index.yaml: {e}")))
 }
 
 fn chrono_now() -> String {
@@ -599,8 +598,7 @@ pub async fn export_chart(
     version: &str,
     output_dir: &str,
 ) -> AppResult<PathBuf> {
-    let helm =
-        super::ops::which_helm().ok_or_else(|| AppError::Other("helm not found".into()))?;
+    let helm = super::ops::which_helm().ok_or_else(|| AppError::Other("helm not found".into()))?;
 
     let output = std::path::PathBuf::from(output_dir);
     std::fs::create_dir_all(&output)

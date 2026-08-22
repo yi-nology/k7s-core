@@ -15,8 +15,6 @@ pub mod exec;
 #[cfg(not(target_os = "ios"))]
 pub mod helm;
 pub mod image;
-pub mod observability;
-pub mod security;
 #[cfg(not(target_os = "ios"))]
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -30,6 +28,7 @@ pub mod logs;
 pub mod manager;
 pub mod mappers;
 pub mod nodeshell;
+pub mod observability;
 pub mod pod_diagnosis;
 #[cfg(not(target_os = "ios"))]
 pub mod pod_files;
@@ -38,6 +37,7 @@ pub mod properties;
 #[cfg(not(target_os = "ios"))]
 pub mod restart;
 pub mod rollout;
+pub mod security;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[cfg(not(target_os = "ios"))]
 #[cfg(not(target_os = "ios"))]
@@ -46,15 +46,12 @@ pub mod watchers;
 
 use serde::Serialize;
 
-mod kind;
 pub mod events;
+mod kind;
 pub use discovery::{custom_kind_counts, CustomKindCount};
-pub use kind::*;
 pub use dto::Row;
+pub use kind::*;
 pub use manager::ClientManager;
-
-
-
 
 /// Payload for [`events::RESOURCE_UPDATE`].
 ///

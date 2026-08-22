@@ -133,7 +133,10 @@ pub struct DocDryRun {
 /// patch per doc, collecting the server-defaulted proposed YAML. Stops at the
 /// first hard error (parse/resolve), but a *rejected* dry run is recorded as a
 /// per-doc error and the loop continues so the caller sees every problem.
-pub async fn multi_dry_run(yaml: &str, client: k7s_deps::kube::Client) -> AppResult<Vec<DocDryRun>> {
+pub async fn multi_dry_run(
+    yaml: &str,
+    client: k7s_deps::kube::Client,
+) -> AppResult<Vec<DocDryRun>> {
     let docs = split_documents(yaml);
     if docs.is_empty() {
         return Err(AppError::Other("no documents in YAML bundle".into()));

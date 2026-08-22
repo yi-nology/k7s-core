@@ -79,7 +79,8 @@ pub fn save_prefs(data_dir: &Path, prefs: &Prefs) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::Other(e.to_string()))?;
     }
-    let text = k7s_deps::serde_json::to_string_pretty(prefs).map_err(|e| AppError::Other(e.to_string()))?;
+    let text = k7s_deps::serde_json::to_string_pretty(prefs)
+        .map_err(|e| AppError::Other(e.to_string()))?;
     std::fs::write(&path, text).map_err(|e| AppError::Other(e.to_string()))?;
     Ok(())
 }

@@ -9,10 +9,10 @@ use crate::error::{AppError, AppResult};
 use k7s_deps::k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k7s_deps::kube::api::Api;
 use k7s_deps::kube::Client;
+use k7s_deps::tokio::sync::RwLock;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use k7s_deps::tokio::sync::RwLock;
 
 /// Maximum snapshots to keep per ConfigMap/Secret.
 const MAX_SNAPSHOTS_PER_RESOURCE: usize = 20;

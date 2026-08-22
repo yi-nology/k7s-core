@@ -16,9 +16,9 @@
 use crate::error::{AppError, AppResult};
 use k7s_deps::k8s_openapi::api::core::v1::{Node, Pod};
 use k7s_deps::kube::api::{Api, AttachParams, PostParams};
+use k7s_deps::tokio::io::AsyncReadExt;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use k7s_deps::tokio::io::AsyncReadExt;
 
 use crate::kube::{image::import, nodeshell};
 
@@ -203,7 +203,8 @@ pub fn parse_listed_images(output: &str, runtime: &str) -> Vec<String> {
             output
                 .lines()
                 .filter_map(|line| {
-                    let v: k7s_deps::serde_json::Value = k7s_deps::serde_json::from_str(line.trim()).ok()?;
+                    let v: k7s_deps::serde_json::Value =
+                        k7s_deps::serde_json::from_str(line.trim()).ok()?;
                     let repo = v.get("Repository")?.as_str()?;
                     let tag = v.get("Tag")?.as_str()?;
                     if repo == "<none>" || tag == "<none>" {
@@ -226,7 +227,10 @@ pub fn parse_listed_images(output: &str, runtime: &str) -> Vec<String> {
 }
 
 /// List container images present on a node.
-pub async fn list_node_images(client: k7s_deps::kube::Client, node: &str) -> AppResult<Vec<String>> {
+pub async fn list_node_images(
+    client: k7s_deps::kube::Client,
+    node: &str,
+) -> AppResult<Vec<String>> {
     let node_api: Api<Node> = Api::all(client.clone());
     let node_obj = node_api.get(node).await?;
     let version = node_obj

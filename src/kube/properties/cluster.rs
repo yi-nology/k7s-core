@@ -3,7 +3,9 @@
 use super::*;
 use crate::error::AppResult;
 use k7s_deps::k8s_openapi::api::core::v1::Node;
-use k7s_deps::k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim, ServiceAccount};
+use k7s_deps::k8s_openapi::api::core::v1::{
+    PersistentVolume, PersistentVolumeClaim, ServiceAccount,
+};
 use k7s_deps::k8s_openapi::api::storage::v1::StorageClass;
 use k7s_deps::kube::api::Api;
 use k7s_deps::kube::Client;

@@ -19,9 +19,9 @@ use k7s_deps::kube::api::{
 use k7s_deps::kube::config::Kubeconfig;
 use k7s_deps::kube::core::GroupVersionKind;
 use k7s_deps::kube::ResourceExt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use k7s_deps::tokio::sync::mpsc;
 use k7s_deps::tokio::task::JoinHandle;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Shared connection sequence
@@ -147,7 +147,10 @@ pub async fn resource_for(kind: &str, mgr: &ClientManager) -> AppResult<(ApiReso
     let rk = ResourceKind::from_id(kind)
         .ok_or_else(|| AppError::Other(format!("unknown kind: {kind}")))?;
     let gvk = GroupVersionKind::gvk(rk.group(), rk.version(), rk.kind_name());
-    Ok((ApiResource::from_gvk_with_plural(&gvk, kind), rk.is_namespaced()))
+    Ok((
+        ApiResource::from_gvk_with_plural(&gvk, kind),
+        rk.is_namespaced(),
+    ))
 }
 
 /// Build a dynamic API for `kind`, namespaced or cluster-scoped as appropriate.
@@ -303,7 +306,11 @@ pub fn redact_secret(obj: &mut DynamicObject) {
 /// Finds the release by label rather than reconstructing the Secret's name:
 /// `sh.helm.release.v1.<name>.v<revision>` requires knowing the revision, and
 /// the labels are what Helm itself queries on.
-pub async fn helm_manifest(client: k7s_deps::kube::Client, namespace: &str, name: &str) -> AppResult<String> {
+pub async fn helm_manifest(
+    client: k7s_deps::kube::Client,
+    namespace: &str,
+    name: &str,
+) -> AppResult<String> {
     let api: Api<Secret> = Api::namespaced(client, namespace);
     let lp = ListParams::default()
         .fields(&format!("type={}", crate::kube::helm::RELEASE_SECRET_TYPE))
@@ -639,14 +646,19 @@ pub async fn set_cordon_core(
     mgr: &ClientManager,
 ) -> AppResult<()> {
     let (api, _is_helm) = dynamic_api(client, "nodes", "", mgr).await?;
-    let patch = Patch::Merge(k7s_deps::serde_json::json!({ "spec": { "unschedulable": unschedulable } }));
+    let patch =
+        Patch::Merge(k7s_deps::serde_json::json!({ "spec": { "unschedulable": unschedulable } }));
     api.patch(name, &PatchParams::default(), &patch).await?;
     Ok(())
 }
 
 /// Restart a pod by deleting it so its controller recreates a fresh one.
 /// Refuses a pod with no controlling owner.
-pub async fn restart_pod_core(client: k7s_deps::kube::Client, namespace: &str, name: &str) -> AppResult<()> {
+pub async fn restart_pod_core(
+    client: k7s_deps::kube::Client,
+    namespace: &str,
+    name: &str,
+) -> AppResult<()> {
     let api: Api<k7s_deps::k8s_openapi::api::core::v1::Pod> = Api::namespaced(client, namespace);
     let pod = api.get(name).await?;
     if !crate::kube::restart::has_controller(&pod) {

@@ -70,8 +70,8 @@ fn load_file() -> AppResult<LokiFile> {
 
 fn save_file(f: &LokiFile) -> AppResult<()> {
     let path = config_path()?;
-    let text =
-        k7s_deps::serde_json::to_string_pretty(f).map_err(|e| AppError::Other(format!("serialise: {e}")))?;
+    let text = k7s_deps::serde_json::to_string_pretty(f)
+        .map_err(|e| AppError::Other(format!("serialise: {e}")))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| AppError::Other(format!("write tmp: {e}")))?;
     std::fs::rename(&tmp, &path).map_err(|e| AppError::Other(format!("rename: {e}")))?;
@@ -252,7 +252,9 @@ pub async fn query_audit_events(query: &AuditQuery) -> AppResult<Vec<AuditEvent>
     let logql = format!("{{{}}}", selectors.join(", "));
 
     // Loki /loki/api/v1/query_range
-    let end = k7s_deps::chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    let end = k7s_deps::chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or(0);
     let start = end - query.since_seconds * 1_000_000_000;
 
     // Simple percent encoding for the LogQL query (only braces and quotes need encoding)

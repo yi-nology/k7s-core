@@ -52,7 +52,9 @@ pub async fn discover(client: &Client) -> Vec<CustomKind> {
     let crds = match api.list(&ListParams::default()).await {
         Ok(list) => list,
         Err(e) => {
-            k7s_deps::tracing::warn!("CRD discovery unavailable; no custom kinds will be shown: {e}");
+            k7s_deps::tracing::warn!(
+                "CRD discovery unavailable; no custom kinds will be shown: {e}"
+            );
             return Vec::new();
         }
     };
@@ -116,7 +118,9 @@ pub async fn custom_kind_counts(client: &Client) -> AppResult<Vec<CustomKindCoun
             async move {
                 let api: Api<DynamicObject> = Api::all_with(client, &kind.api_resource());
                 let count = match api.list(&ListParams::default().limit(1)).await {
-                    Ok(list) => count_from_list(list.items.len(), list.metadata.remaining_item_count),
+                    Ok(list) => {
+                        count_from_list(list.items.len(), list.metadata.remaining_item_count)
+                    }
                     Err(e) => {
                         k7s_deps::tracing::debug!(
                             kind = %kind.id,

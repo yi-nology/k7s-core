@@ -8,11 +8,11 @@
 //! messages arrive (e.g., from IM channels), they're queued and processed
 //! serially to prevent race conditions.
 
+use k7s_deps::tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use k7s_deps::tokio::sync::Mutex;
 
 /// A persistent conversation session.
 #[derive(Clone, Debug, Serialize, Deserialize)]

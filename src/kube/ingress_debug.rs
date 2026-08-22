@@ -300,7 +300,9 @@ mod tests {
     /// count_ready_addresses filters by service name label and ready condition.
     #[test]
     fn count_ready_filters_correctly() {
-        use k7s_deps::k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointSlice};
+        use k7s_deps::k8s_openapi::api::discovery::v1::{
+            Endpoint, EndpointConditions, EndpointSlice,
+        };
         use k7s_deps::k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
         use std::collections::BTreeMap;
 

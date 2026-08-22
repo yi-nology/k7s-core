@@ -15,16 +15,16 @@
 //!
 //! Port-forwarding goes via the kubelet instead, and works.
 
-use crate::kube::events;
 use super::exporter::{self, NodeSample, Sampler};
 use crate::core::events::EventSink;
 use crate::error::{AppError, AppResult};
+use crate::kube::events;
 use k7s_deps::k8s_openapi::api::core::v1::Pod;
 use k7s_deps::kube::api::{Api, ListParams};
 use k7s_deps::kube::{Client, ResourceExt};
-use serde::Serialize;
 use k7s_deps::tokio::sync::{mpsc, oneshot};
 use k7s_deps::tokio::time::{interval, Duration, MissedTickBehavior};
+use serde::Serialize;
 
 /// The port node-exporter listens on. Its well-known default; the DaemonSet on
 /// murphy-yi declares it explicitly too.

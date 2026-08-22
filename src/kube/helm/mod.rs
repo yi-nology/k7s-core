@@ -25,7 +25,6 @@ pub mod market;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod ops;
 
-
 use crate::kube::dto::{Cell, Row, Tone};
 use k7s_deps::base64::Engine;
 use k7s_deps::flate2::read::GzDecoder;
@@ -138,7 +137,9 @@ pub fn decode_release(secret: &Secret) -> Option<Release> {
     // transport base64 the client already undid.
     let gz = k7s_deps::base64::engine::general_purpose::STANDARD
         .decode(raw)
-        .map_err(|e| k7s_deps::tracing::warn!("helm release {}: bad base64: {e}", secret.name_any()))
+        .map_err(|e| {
+            k7s_deps::tracing::warn!("helm release {}: bad base64: {e}", secret.name_any())
+        })
         .ok()?;
 
     let mut json = String::new();
@@ -304,7 +305,11 @@ pub fn flatten_values(config: &k7s_deps::serde_json::Value) -> Vec<(String, Stri
     out
 }
 
-fn flatten_into(prefix: &str, value: &k7s_deps::serde_json::Value, out: &mut Vec<(String, String)>) {
+fn flatten_into(
+    prefix: &str,
+    value: &k7s_deps::serde_json::Value,
+    out: &mut Vec<(String, String)>,
+) {
     match value {
         k7s_deps::serde_json::Value::Object(map) => {
             for (k, v) in map {
@@ -506,9 +511,11 @@ mod tests {
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         gz.write_all(body.to_string().as_bytes()).unwrap();
         // What Helm stores in the value: base64 text.
-        let helm_value = k7s_deps::base64::engine::general_purpose::STANDARD.encode(gz.finish().unwrap());
+        let helm_value =
+            k7s_deps::base64::engine::general_purpose::STANDARD.encode(gz.finish().unwrap());
         // What the API serialises: that text, base64'd again for transport.
-        let transport = k7s_deps::base64::engine::general_purpose::STANDARD.encode(helm_value.as_bytes());
+        let transport =
+            k7s_deps::base64::engine::general_purpose::STANDARD.encode(helm_value.as_bytes());
 
         k7s_deps::serde_json::from_value(json!({
             "metadata": { "name": format!("sh.helm.release.v1.{name}.v{revision}"), "namespace": ns },

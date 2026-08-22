@@ -111,7 +111,8 @@ impl MemoryStore {
         data.context = context.to_string();
         // Prune expired short-term memories.
         let ttl_days = 7;
-        let cutoff = k7s_deps::chrono::Utc::now() - k7s_deps::chrono::Duration::days(ttl_days as i64);
+        let cutoff =
+            k7s_deps::chrono::Utc::now() - k7s_deps::chrono::Duration::days(ttl_days as i64);
         data.entries.retain(|e| {
             e.tier != Tier::ShortTerm
                 || k7s_deps::chrono::DateTime::parse_from_rfc3339(&e.created_at)

@@ -14,9 +14,9 @@ use crate::error::AppError;
 use k7s_deps::k8s_openapi::api::core::v1::Pod;
 use k7s_deps::kube::api::{Api, AttachParams, TerminalSize};
 use k7s_deps::kube::Client;
-use serde::Serialize;
 use k7s_deps::tokio::io::{AsyncReadExt, AsyncWriteExt};
 use k7s_deps::tokio::sync::mpsc;
+use serde::Serialize;
 
 /// Prefix for stdout chunk events (`shell-out:{stream_id}`).
 pub const SHELL_OUT_PREFIX: &str = "shell-out:";
@@ -145,9 +145,10 @@ async fn exec_pump(
         .tty(true)
         .container(container.to_string());
 
-    let mut proc = api.exec(pod, argv, &ap).await.map_err(|e| {
-        AppError::Kube(e.to_string())
-    })?;
+    let mut proc = api
+        .exec(pod, argv, &ap)
+        .await
+        .map_err(|e| AppError::Kube(e.to_string()))?;
 
     let mut stdout = proc
         .stdout()

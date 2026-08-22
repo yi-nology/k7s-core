@@ -19,10 +19,10 @@
 
 use crate::core::events::EventSink;
 use crate::error::{AppError, AppResult};
-use serde::Serialize;
-use std::process::Stdio;
 use k7s_deps::tokio::io::{AsyncBufReadExt, BufReader};
 use k7s_deps::tokio::process::Command;
+use serde::Serialize;
+use std::process::Stdio;
 
 // ---------------------------------------------------------------------------
 // Event names
@@ -349,7 +349,10 @@ async fn scan_with_trivy(
 }
 
 /// Parse the trivy JSON report into our common `ScanResult`.
-fn parse_trivy_report(image_ref: &str, report: &k7s_deps::serde_json::Value) -> AppResult<ScanResult> {
+fn parse_trivy_report(
+    image_ref: &str,
+    report: &k7s_deps::serde_json::Value,
+) -> AppResult<ScanResult> {
     let mut vulns = Vec::new();
     let results = report
         .get("Results")
@@ -517,7 +520,10 @@ async fn scan_with_grype(grype: &str, image_ref: &str, sink: EventSink) -> AppRe
 }
 
 /// Parse the grype JSON report into our common `ScanResult`.
-fn parse_grype_report(image_ref: &str, report: &k7s_deps::serde_json::Value) -> AppResult<ScanResult> {
+fn parse_grype_report(
+    image_ref: &str,
+    report: &k7s_deps::serde_json::Value,
+) -> AppResult<ScanResult> {
     let mut vulns = Vec::new();
     let matches = report
         .get("matches")

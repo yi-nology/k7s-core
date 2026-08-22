@@ -13,8 +13,8 @@ use k7s_deps::futures::{AsyncBufReadExt, StreamExt};
 use k7s_deps::k8s_openapi::api::core::v1::Pod;
 use k7s_deps::kube::api::{Api, LogParams};
 use k7s_deps::kube::Client;
-use serde::Serialize;
 use k7s_deps::tokio::time::{interval, Duration};
+use serde::Serialize;
 
 /// Flush cadence for batched log lines.
 const FLUSH: Duration = Duration::from_millis(80);

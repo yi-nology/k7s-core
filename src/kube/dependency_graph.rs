@@ -203,7 +203,8 @@ pub async fn build_dependency_graph(client: Client) -> AppResult<DependencyGraph
     }
 
     // --- Ingresses (link to Services via backend rules) ---
-    let ing_api: Api<k7s_deps::k8s_openapi::api::networking::v1::Ingress> = Api::all(client.clone());
+    let ing_api: Api<k7s_deps::k8s_openapi::api::networking::v1::Ingress> =
+        Api::all(client.clone());
     let ings = ing_api.list(&ListParams::default()).await?;
     for ing in &ings.items {
         let ing_name = ing.metadata.name.clone().unwrap_or_default();

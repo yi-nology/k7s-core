@@ -29,10 +29,10 @@ use k7s_deps::kube::core::{ApiResource, DynamicObject};
 use k7s_deps::kube::runtime::reflector::Lookup;
 use k7s_deps::kube::runtime::{reflector, watcher, WatchStreamExt};
 use k7s_deps::kube::{Api, Client, Resource};
+use k7s_deps::tokio::time::{interval, Duration, MissedTickBehavior};
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use std::hash::Hash;
-use k7s_deps::tokio::time::{interval, Duration, MissedTickBehavior};
 
 /// Maximum snapshot emit rate per kind (coalesces bursts of watch events).
 const DEBOUNCE: Duration = Duration::from_millis(150);

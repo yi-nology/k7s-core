@@ -15,9 +15,9 @@
 //! call. Enum dispatch is also faster, and there's only ever one variant
 //! live at a time, so the match is monomorphised by the compiler.
 
+use k7s_deps::tokio::sync::broadcast;
 #[cfg(feature = "tauri")]
 use tauri::Emitter;
-use k7s_deps::tokio::sync::broadcast;
 
 /// Where every `app.emit(...)` call in the core ends up.
 ///
@@ -137,7 +137,8 @@ impl WebEventSink {
         // Drop on overflow — the broadcast returns Err if there are no
         // receivers OR the channel is full. Both are fine: nobody listening
         // or somebody slow.
-        let value = k7s_deps::serde_json::to_value(payload).unwrap_or(k7s_deps::serde_json::Value::Null);
+        let value =
+            k7s_deps::serde_json::to_value(payload).unwrap_or(k7s_deps::serde_json::Value::Null);
         let _ = self.tx.send(WebEvent {
             name: event.to_string(),
             data: value,

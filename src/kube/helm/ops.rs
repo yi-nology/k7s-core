@@ -22,11 +22,11 @@
 
 use crate::core::events::EventSink;
 use crate::error::{AppError, AppResult};
+use k7s_deps::tokio::io::{AsyncBufReadExt, BufReader};
+use k7s_deps::tokio::process::Command;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
-use k7s_deps::tokio::io::{AsyncBufReadExt, BufReader};
-use k7s_deps::tokio::process::Command;
 
 /// Tauri event name carrying a single log line from a running `helm` invocation.
 pub const HELM_LOG_EVENT: &str = "helm-op-log";

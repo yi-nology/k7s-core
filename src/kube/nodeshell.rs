@@ -226,7 +226,10 @@ pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90
 /// Shared by `start_node_shell` (interactive) and `import::import_to_node`
 /// (one-shot). Both need the same "wait, then surface the actionable reason"
 /// behaviour, so it lives with the pod spec rather than in either caller.
-pub async fn await_debug_pod(api: &k7s_deps::kube::Api<Pod>, name: &str) -> crate::error::AppResult<()> {
+pub async fn await_debug_pod(
+    api: &k7s_deps::kube::Api<Pod>,
+    name: &str,
+) -> crate::error::AppResult<()> {
     let deadline = k7s_deps::tokio::time::Instant::now() + READY_TIMEOUT;
     let mut last = String::from("the pod was never observed");
     while k7s_deps::tokio::time::Instant::now() < deadline {

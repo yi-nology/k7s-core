@@ -95,9 +95,9 @@ mod tests {
 
     fn test_state() -> Arc<CoreState> {
         CoreState::new(
-            Arc::new(crate::kube::ClientManager::new(crate::core::events::EventSink::Mcp(
-                crate::core::events::McpEventSink::new(),
-            ))),
+            Arc::new(crate::kube::ClientManager::new(
+                crate::core::events::EventSink::Mcp(crate::core::events::McpEventSink::new()),
+            )),
             std::env::temp_dir().join(format!("k7s-registry-test-{}", std::process::id())),
         )
     }
@@ -122,9 +122,11 @@ mod tests {
         });
 
         let handler = r.get("echo").expect("echo registered");
-        let out =
-            block_on(handler(test_state(), k7s_deps::serde_json::json!({ "count": 21 })))
-                .expect("echo ok");
+        let out = block_on(handler(
+            test_state(),
+            k7s_deps::serde_json::json!({ "count": 21 }),
+        ))
+        .expect("echo ok");
         assert_eq!(out, k7s_deps::serde_json::json!(42));
     }
 

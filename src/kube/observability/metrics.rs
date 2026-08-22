@@ -10,16 +10,16 @@
 //! The two share the latest cluster CPU/MEM % via a small mutex so the status
 //! event can include them without re-fetching.
 
-use crate::kube::events;
 use crate::core::events::EventSink;
+use crate::kube::events;
 use k7s_deps::k8s_openapi::api::core::v1::Node;
 use k7s_deps::kube::api::{Api, ListParams};
 use k7s_deps::kube::Client;
+use k7s_deps::tokio::sync::Mutex;
+use k7s_deps::tokio::time::{interval, Duration, Instant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use k7s_deps::tokio::sync::Mutex;
-use k7s_deps::tokio::time::{interval, Duration, Instant};
 
 /// Default poll intervals. Both are user-configurable (B23); these are the
 /// values used when nothing has been saved.
@@ -143,7 +143,10 @@ pub fn spawn_pollers(
     sink: EventSink,
     client: Client,
     intervals: PollIntervals,
-) -> (k7s_deps::tokio::task::JoinHandle<()>, k7s_deps::tokio::task::JoinHandle<()>) {
+) -> (
+    k7s_deps::tokio::task::JoinHandle<()>,
+    k7s_deps::tokio::task::JoinHandle<()>,
+) {
     let shared: SharedClusterPct = Arc::new(Mutex::new(None));
 
     let metrics_task = k7s_deps::tokio::spawn(metrics_loop(
@@ -194,7 +197,9 @@ async fn metrics_loop(sink: EventSink, client: Client, shared: SharedClusterPct,
 }
 
 /// Fetch pod metrics and reduce to a "ns/name" → usage map (summing containers).
-async fn fetch_pod_metrics(client: &Client) -> Result<HashMap<String, PodUsage>, k7s_deps::kube::Error> {
+async fn fetch_pod_metrics(
+    client: &Client,
+) -> Result<HashMap<String, PodUsage>, k7s_deps::kube::Error> {
     let req = k7s_deps::http::Request::get("/apis/metrics.k8s.io/v1beta1/pods")
         .body(Vec::new())
         .map_err(|e| k7s_deps::kube::Error::Service(Box::new(e)))?;

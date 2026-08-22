@@ -45,7 +45,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("StatefulSets", ResourceKind::Statefulsets),
         ("DaemonSets", ResourceKind::Daemonsets),
         ("Ingresses", ResourceKind::Ingresses),
-        ("PersistentVolumeClaims", ResourceKind::Persistentvolumeclaims),
+        (
+            "PersistentVolumeClaims",
+            ResourceKind::Persistentvolumeclaims,
+        ),
         ("PersistentVolumes", ResourceKind::Persistentvolumes),
         ("StorageClasses", ResourceKind::Storageclasses),
         ("ServiceAccounts", ResourceKind::Serviceaccounts),
@@ -56,7 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("Roles", ResourceKind::Roles),
         ("ClusterRoles", ResourceKind::Clusterroles),
         ("NetworkPolicies", ResourceKind::Networkpolicies),
-        ("HorizontalPodAutoscalers", ResourceKind::Horizontalpodautoscalers),
+        (
+            "HorizontalPodAutoscalers",
+            ResourceKind::Horizontalpodautoscalers,
+        ),
         ("ResourceQuotas", ResourceKind::Resourcequotas),
         ("LimitRanges", ResourceKind::Limitranges),
     ];
@@ -119,7 +125,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "-".repeat(70));
     println!(
         "Total: {} resources across {} kinds ({} ok, {} errors)\n",
-        total, ok_count + err_count, ok_count, err_count
+        total,
+        ok_count + err_count,
+        ok_count,
+        err_count
     );
 
     // ── Check CRDs ──

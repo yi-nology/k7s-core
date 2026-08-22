@@ -69,7 +69,8 @@ pub async fn run_port_forward(
                 Ok(mut pf) => match pf.take_stream(remote_port) {
                     // Pump until either side closes.
                     Some(mut upstream) => {
-                        let _ = k7s_deps::tokio::io::copy_bidirectional(&mut tcp, &mut upstream).await;
+                        let _ =
+                            k7s_deps::tokio::io::copy_bidirectional(&mut tcp, &mut upstream).await;
                     }
                     None => {
                         let _ = errors.try_send(format!("port {remote_port} not open on {pod}"));
@@ -234,7 +235,8 @@ mod tests {
     /// A pod with no status at all (just scheduled) is not ready.
     #[test]
     fn pod_without_status_is_not_ready() {
-        let p: Pod = k7s_deps::serde_json::from_value(json!({ "metadata": { "name": "p" } })).unwrap();
+        let p: Pod =
+            k7s_deps::serde_json::from_value(json!({ "metadata": { "name": "p" } })).unwrap();
         assert!(!is_ready(&p));
     }
 

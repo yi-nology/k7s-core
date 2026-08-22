@@ -12,8 +12,8 @@
 //! "what is this tar?", `copy_image` answers "put it in my registry".
 
 use crate::error::{AppError, AppResult};
-use serde::Serialize;
 use k7s_deps::tokio::process::Command;
+use serde::Serialize;
 
 /// The salient facts about an image inside a local archive, enough to decide
 /// whether to copy it and what to name the destination.

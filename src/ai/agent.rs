@@ -26,9 +26,9 @@ use crate::ai::permission::{self, Decision};
 use crate::ai::tools::{ToolContext, ToolRegistry};
 use crate::kube::manager::ClientManager;
 use k7s_deps::futures::StreamExt;
+use k7s_deps::tokio::sync::oneshot;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use k7s_deps::tokio::sync::oneshot;
 
 /// The conversation turn the UI sends to start a chat.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -512,7 +512,10 @@ impl AgentLoop {
                 // construct a fallback summary so the user always sees something.
                 let effective_text = if assistant_text.is_empty() {
                     let summary = summarize_tool_results(&messages);
-                    k7s_deps::tracing::info!(summary_len = summary.len(), "fallback summary generated");
+                    k7s_deps::tracing::info!(
+                        summary_len = summary.len(),
+                        "fallback summary generated"
+                    );
                     summary
                 } else {
                     assistant_text.clone()
@@ -577,7 +580,8 @@ impl AgentLoop {
                 }
 
                 let args: k7s_deps::serde_json::Value =
-                    k7s_deps::serde_json::from_str(&call.arguments).unwrap_or(k7s_deps::serde_json::Value::Null);
+                    k7s_deps::serde_json::from_str(&call.arguments)
+                        .unwrap_or(k7s_deps::serde_json::Value::Null);
                 let is_write = self.registry.is_write(&call.name);
                 tools_called.push(call.name.clone());
 
@@ -736,7 +740,8 @@ impl AgentLoop {
                 let trimmed = trim_result(result_val);
                 messages.push(Message::Tool {
                     tool_call_id: call.id.clone(),
-                    content: k7s_deps::serde_json::to_string(&trimmed).unwrap_or_else(|_| "{}".into()),
+                    content: k7s_deps::serde_json::to_string(&trimmed)
+                        .unwrap_or_else(|_| "{}".into()),
                 });
             }
         }
@@ -809,7 +814,8 @@ fn summarize_tool_results(messages: &[Message]) -> String {
                 content_len = content.len(),
                 "processing tool result for summary"
             );
-            if let Ok(val) = k7s_deps::serde_json::from_str::<k7s_deps::serde_json::Value>(content) {
+            if let Ok(val) = k7s_deps::serde_json::from_str::<k7s_deps::serde_json::Value>(content)
+            {
                 if let Some(arr) = val.as_array() {
                     // Array of resources — show count + first few names.
                     let count = arr.len();
@@ -944,8 +950,8 @@ fn trim_result(v: k7s_deps::serde_json::Value) -> k7s_deps::serde_json::Value {
 mod tests {
     use super::*;
     use crate::ai::llm::{ChatStream, FunctionDef, StreamEvent, StreamItem};
-    use std::sync::Mutex;
     use k7s_deps::tokio::sync::oneshot;
+    use std::sync::Mutex;
 
     /// A mock LlmClient that returns a pre-scripted sequence of turn responses.
     /// Each call to `chat_stream` advances to the next script entry.
@@ -1037,7 +1043,8 @@ mod tests {
 
     #[test]
     fn trim_caps_array_at_50() {
-        let arr: Vec<k7s_deps::serde_json::Value> = (0..100).map(k7s_deps::serde_json::Value::from).collect();
+        let arr: Vec<k7s_deps::serde_json::Value> =
+            (0..100).map(k7s_deps::serde_json::Value::from).collect();
         let v = trim_result(k7s_deps::serde_json::Value::Array(arr));
         let a = v.as_array().unwrap();
         assert_eq!(a.len(), 51); // 50 + the note
@@ -1046,7 +1053,10 @@ mod tests {
 
     #[test]
     fn trim_passes_through_small_values() {
-        assert_eq!(trim_result(k7s_deps::serde_json::json!(42)), k7s_deps::serde_json::json!(42));
+        assert_eq!(
+            trim_result(k7s_deps::serde_json::json!(42)),
+            k7s_deps::serde_json::json!(42)
+        );
         assert_eq!(
             trim_result(k7s_deps::serde_json::json!("short")),
             k7s_deps::serde_json::json!("short")

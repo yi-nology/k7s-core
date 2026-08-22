@@ -291,7 +291,11 @@ impl ResourceKind {
 
     /// Create an ApiResource for DynamicObject-based watchers.
     pub fn api_resource(&self) -> k7s_deps::kube::core::ApiResource {
-        let gvk = k7s_deps::kube::core::GroupVersionKind::gvk(self.group(), self.version(), self.kind_name());
+        let gvk = k7s_deps::kube::core::GroupVersionKind::gvk(
+            self.group(),
+            self.version(),
+            self.kind_name(),
+        );
         k7s_deps::kube::core::ApiResource::from_gvk_with_plural(&gvk, self.plural())
     }
 }

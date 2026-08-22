@@ -326,7 +326,9 @@ fn port_matches(
             *n == target_port
         }
         // Named ports cannot be resolved without the pod spec; treat as no match.
-        Some(k7s_deps::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(_)) => false,
+        Some(k7s_deps::k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(_)) => {
+            false
+        }
         // No port specified = all ports.
         None => true,
     }

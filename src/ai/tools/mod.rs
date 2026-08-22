@@ -73,8 +73,11 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute with the LLM-supplied arguments (already parsed to a Value).
-    async fn call(&self, ctx: &ToolContext, args: k7s_deps::serde_json::Value)
-        -> AiResult<k7s_deps::serde_json::Value>;
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: k7s_deps::serde_json::Value,
+    ) -> AiResult<k7s_deps::serde_json::Value>;
 }
 
 /// Holds all registered tools and the function defs handed to the LLM.
@@ -214,7 +217,10 @@ pub async fn dynamic_api(
     ctx: &ToolContext,
     kind: &str,
     namespace: &str,
-) -> AiResult<(k7s_deps::kube::Api<k7s_deps::kube::api::DynamicObject>, bool)> {
+) -> AiResult<(
+    k7s_deps::kube::Api<k7s_deps::kube::api::DynamicObject>,
+    bool,
+)> {
     let client = require_client(&ctx.manager).await?;
     shell_common::dynamic_api(client, kind, namespace, &ctx.manager)
         .await

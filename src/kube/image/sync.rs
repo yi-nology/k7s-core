@@ -25,10 +25,10 @@
 use crate::core::events::EventSink;
 use crate::error::{AppError, AppResult};
 use crate::kube::{image::export, image::repo};
-use serde::Serialize;
-use std::process::Stdio;
 use k7s_deps::tokio::io::{AsyncBufReadExt, BufReader};
 use k7s_deps::tokio::process::Command;
+use serde::Serialize;
+use std::process::Stdio;
 
 /// Tauri event name carrying one stdout/stderr line from a running skopeo call.
 pub const IMAGE_SYNC_LOG_EVENT: &str = "image-sync-log";
@@ -999,7 +999,8 @@ mod tests {
 
         // The auth value must be base64("admin:s3cret"), and the structure must
         // be a valid Docker auth file skopeo can consume via --authfile.
-        let expected_auth = k7s_deps::base64::engine::general_purpose::STANDARD.encode("admin:s3cret");
+        let expected_auth =
+            k7s_deps::base64::engine::general_purpose::STANDARD.encode("admin:s3cret");
         assert!(
             body.contains(r#""harbor.local""#),
             "body missing host: {body}"

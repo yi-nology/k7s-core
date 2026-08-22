@@ -151,7 +151,9 @@ pub fn map_event(e: &k7s_deps::k8s_openapi::api::core::v1::Event) -> Row {
 }
 
 /// Best "last seen" time for an event: lastTimestamp, else eventTime, else creation.
-fn event_last_seen(e: &k7s_deps::k8s_openapi::api::core::v1::Event) -> k7s_deps::k8s_openapi::jiff::Timestamp {
+fn event_last_seen(
+    e: &k7s_deps::k8s_openapi::api::core::v1::Event,
+) -> k7s_deps::k8s_openapi::jiff::Timestamp {
     if let Some(t) = &e.last_timestamp {
         return t.0;
     }
@@ -366,14 +368,15 @@ mod tests {
     /// lastTimestamp is preferred, but events that only carry eventTime still sort.
     #[test]
     fn event_time_fallback() {
-        let e: k7s_deps::k8s_openapi::api::core::v1::Event = k7s_deps::serde_json::from_value(json!({
-            "metadata": { "name": "e", "namespace": "prod", "uid": "u" },
-            "type": "Normal",
-            "reason": "Started",
-            "eventTime": "2026-07-16T09:00:00.000000Z",
-            "involvedObject": { "kind": "Pod", "name": "p" },
-        }))
-        .unwrap();
+        let e: k7s_deps::k8s_openapi::api::core::v1::Event =
+            k7s_deps::serde_json::from_value(json!({
+                "metadata": { "name": "e", "namespace": "prod", "uid": "u" },
+                "type": "Normal",
+                "reason": "Started",
+                "eventTime": "2026-07-16T09:00:00.000000Z",
+                "involvedObject": { "kind": "Pod", "name": "p" },
+            }))
+            .unwrap();
         let row = map_event(&e);
         assert!(row.cells[4].sort.is_some());
         assert_eq!(row.cells[5].text, "×1", "missing count defaults to 1");

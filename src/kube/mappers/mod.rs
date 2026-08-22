@@ -138,7 +138,9 @@ pub fn humanize_duration(mut secs: i64) -> String {
 }
 
 /// Seconds between an RFC3339-ish k8s `Time` and now (clamped at 0).
-pub(super) fn secs_since(t: &k7s_deps::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time) -> i64 {
+pub(super) fn secs_since(
+    t: &k7s_deps::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time,
+) -> i64 {
     let now = k7s_deps::k8s_openapi::jiff::Timestamp::now();
     now.duration_since(t.0).as_secs().max(0)
 }

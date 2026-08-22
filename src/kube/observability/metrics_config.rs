@@ -101,8 +101,8 @@ fn load_file() -> AppResult<MetricsFile> {
 
 fn save_file(f: &MetricsFile) -> AppResult<()> {
     let path = config_path()?;
-    let text =
-        k7s_deps::serde_json::to_string_pretty(f).map_err(|e| AppError::Other(format!("serialise: {e}")))?;
+    let text = k7s_deps::serde_json::to_string_pretty(f)
+        .map_err(|e| AppError::Other(format!("serialise: {e}")))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| AppError::Other(format!("write tmp: {e}")))?;
     std::fs::rename(&tmp, &path).map_err(|e| AppError::Other(format!("rename: {e}")))?;

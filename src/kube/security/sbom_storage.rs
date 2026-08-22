@@ -49,8 +49,8 @@ impl SbomStorage {
         let path = source_dir.join(&filename);
         let json = std::fs::read_to_string(&path)
             .map_err(|e| AppError::Other(format!("read sbom: {e}")))?;
-        let sbom: SbomResult =
-            k7s_deps::serde_json::from_str(&json).map_err(|e| AppError::Other(format!("parse sbom: {e}")))?;
+        let sbom: SbomResult = k7s_deps::serde_json::from_str(&json)
+            .map_err(|e| AppError::Other(format!("parse sbom: {e}")))?;
         Ok(sbom)
     }
 

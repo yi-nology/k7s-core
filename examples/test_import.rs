@@ -3,8 +3,8 @@
 //! Run with: cargo run -p k7s-core --example test_import
 
 use k7s_core::core::events::{self, EventSink};
-use k7s_core::core::CoreState;
 use k7s_core::core::shell_common;
+use k7s_core::core::CoreState;
 use k7s_core::kube::client;
 use k7s_core::kube::manager::ClientManager;
 use std::sync::Arc;

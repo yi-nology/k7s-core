@@ -423,7 +423,6 @@ fn finalize_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     /// Drive the SSE parser end-to-end by feeding it bytes through a mock
     /// reqwest stream isn't trivial without HTTP; instead we unit-test the two

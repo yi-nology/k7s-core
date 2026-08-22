@@ -1,29 +1,30 @@
 [package]
 name = "k7s-core"
-version.workspace = true
+version = "0.4.3"
 description = "k7s core — transport-agnostic Kubernetes business logic"
-authors.workspace = true
-edition.workspace = true
-rust-version.workspace = true
+authors = ["k7s"]
+edition = "2021"
+rust-version = "1.77.2"
 
 [lib]
 name = "k7s_core"
 
 [dependencies]
-# Shared dependency umbrella — a path dep inside the workspace now.
-k7s-deps.workspace = true
+# Shared dependency umbrella. Local monorepo dev overrides this via the
+# [patch] in the root Cargo.toml; standalone consumers resolve from git.
+k7s-deps = { git = "https://github.com/yi-nology/k7s-deps.git" }
 
 # Proc-macro dependencies (must be in extern prelude)
-serde.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "sync", "time"] }
 
 # Tauri support (optional)
-tauri = { workspace = true, optional = true }
+tauri = { version = "2", optional = true }
 
 # MCP support (optional)
-rmcp = { workspace = true, optional = true }
-schemars = { workspace = true, optional = true }
+rmcp = { version = "3", optional = true, features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+schemars = { version = "1.0", features = ["chrono04"], optional = true }
 
 [features]
 default = []
@@ -31,7 +32,7 @@ tauri = ["dep:tauri"]
 mcp = ["dep:rmcp", "dep:schemars"]
 
 [dev-dependencies]
-proptest.workspace = true
+proptest = "1"
 # properties tests create a real kube client; rustls needs an explicit crypto
 # provider install when the default provider isn't already set.
-rustls.workspace = true
+rustls = { version = "0.23", features = ["ring"] }

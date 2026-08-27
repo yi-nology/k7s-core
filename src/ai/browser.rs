@@ -73,7 +73,6 @@ pub struct UrlContent {
 fn html_to_text(html: &str, max_chars: usize) -> String {
     let mut result = String::new();
     let mut skip_content = false; // inside <script> or <style>
-    let in_tag = false;
     let mut tag_name = String::new();
 
     let chars: Vec<char> = html.chars().collect();
@@ -84,10 +83,16 @@ fn html_to_text(html: &str, max_chars: usize) -> String {
         }
         let c = chars[i];
         if c == '<' {
-            // Extract tag name (skip '/' for closing tags).
+            // Extract tag name; note whether this is a closing tag. The old
+            // code stripped the '/' before collecting the name, so `</script>`
+            // matched the "script" arm and RE-ENABLED skipping — everything
+            // after the first script open tag was dropped, and the
+            // `"/script"` arm was unreachable dead code.
+            let mut closing = false;
             tag_name.clear();
             let mut j = i + 1;
             if j < chars.len() && chars[j] == '/' {
+                closing = true;
                 j += 1;
             }
             while j < chars.len() && chars[j].is_ascii_alphabetic() {
@@ -96,8 +101,7 @@ fn html_to_text(html: &str, max_chars: usize) -> String {
             }
             // Toggle script/style skipping.
             match tag_name.as_str() {
-                "script" | "style" => skip_content = true,
-                "/script" | "/style" => skip_content = false,
+                "script" | "style" => skip_content = !closing,
                 _ => {}
             }
             // Advance to the closing '>'.
@@ -113,7 +117,7 @@ fn html_to_text(html: &str, max_chars: usize) -> String {
 
             continue;
         }
-        if !skip_content && !in_tag {
+        if !skip_content {
             result.push(c);
         }
         i += 1;
@@ -223,5 +227,26 @@ mod tests {
         let html = "<p>".to_string() + &"a".repeat(5000) + "</p>";
         let text = html_to_text(&html, 100);
         assert!(text.chars().count() <= 110); // some slack for whitespace collapse
+    }
+
+    /// Regression: `</script>` used to re-enable skipping instead of ending
+    /// it, so everything after the first script tag was dropped — real pages
+    /// (with an early analytics snippet) extracted to near-empty text.
+    #[test]
+    fn html_to_text_recovers_after_closed_script() {
+        let html =
+            "<html><head><script>var x=1;</script></head><body>正文内容 body text</body></html>";
+        let text = html_to_text(html, 1000);
+        assert!(text.contains("正文内容"));
+        assert!(text.contains("body text"));
+        assert!(!text.contains("var x"));
+    }
+
+    #[test]
+    fn html_to_text_recovers_after_closed_style() {
+        let html = "<style>a { color: red; }</style>visible text";
+        let text = html_to_text(html, 1000);
+        assert!(text.contains("visible text"));
+        assert!(!text.contains("color"));
     }
 }

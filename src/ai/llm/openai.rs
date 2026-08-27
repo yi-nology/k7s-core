@@ -35,7 +35,16 @@ impl OpenAiClient {
         temperature: Option<f32>,
     ) -> Self {
         Self {
-            http: k7s_deps::reqwest::Client::new(),
+            // connect: fail fast on an unreachable endpoint; read: per-read
+            // timeout, NOT a total-request timeout — chat responses stream,
+            // and a total cap would kill legitimate long generations. A
+            // stalled stream now errors after 5 minutes instead of hanging
+            // the agent loop forever.
+            http: k7s_deps::reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into(),
             model: model.into(),
             api_key: api_key.into(),

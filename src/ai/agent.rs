@@ -714,9 +714,9 @@ impl AgentLoop {
                         sink.emit(AgentEvent::ToolResult {
                             call_id: call.id.clone(),
                             ok: false,
-                            result: k7s_deps::serde_json::json!({ "error": msg }),
+                            result: crate::ai::tools::error_shape::tool_error_payload(&msg),
                         });
-                        k7s_deps::serde_json::json!({ "error": msg })
+                        crate::ai::tools::error_shape::tool_error_payload(&msg)
                     }
                     _ => {
                         let dispatch_result = crate::ai::timeouts::with_timeout(

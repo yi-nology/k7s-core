@@ -261,7 +261,9 @@ pub async fn list_node_images(
             .stdout(true)
             .stderr(false)
             .tty(false);
-        ap = ap.container(&pod_name);
+        // The debug pod spec pins its single container to "debug"; passing the
+        // pod name here made the exec attach to a non-existent container.
+        ap = ap.container("debug");
         let mut proc = pod_api.exec(&pod_name, argv, &ap).await?;
         let mut out = Vec::new();
         if let Some(mut stdout) = proc.stdout() {
@@ -343,7 +345,9 @@ pub async fn export_from_node(
             .stdout(true)
             .stderr(false)
             .tty(false);
-        ap = ap.container(&pod_name);
+        // The debug pod spec pins its single container to "debug"; passing the
+        // pod name here made the exec attach to a non-existent container.
+        ap = ap.container("debug");
         let mut proc = pod_api.exec(&pod_name, argv, &ap).await?;
 
         // Stream stdout to the local file.

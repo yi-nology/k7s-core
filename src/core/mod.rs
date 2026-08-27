@@ -18,6 +18,7 @@
 //! `tauri::AppHandle`, or any specific I/O strategy. Those are shell
 //! concerns.
 
+pub mod audit;
 pub mod events;
 pub mod prefs;
 pub mod shell_common;

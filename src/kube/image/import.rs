@@ -218,7 +218,9 @@ pub async fn import_to_node(
             .stdout(true)
             .stderr(false)
             .tty(false);
-        ap = ap.container(&pod_name);
+        // The debug pod spec pins its single container to "debug"; passing the
+        // pod name here made the exec attach to a non-existent container.
+        ap = ap.container("debug");
         let mut proc = pod_api.exec(&pod_name, argv, &ap).await?;
         use k7s_deps::tokio::io::{AsyncReadExt, AsyncWriteExt};
         if let Some(mut stdin) = proc.stdin() {

@@ -569,7 +569,8 @@ pub async fn spawn_log_stream(
 // ---------------------------------------------------------------------------
 //
 // Each function below contains the logic that was previously duplicated
-// between `commands::core` (Tauri) and `web::resource_handlers` (HTTP).
+// between `commands::core` (Tauri) and the HTTP handler layer (the old
+// `web::resource_handlers`, since folded into the registry catch-all).
 // The thin command/handler layer is responsible for obtaining a `kube::Client`
 // and forwarding errors; everything else lives here.
 

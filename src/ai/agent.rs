@@ -801,6 +801,14 @@ fn save_session_response(data_dir: &std::path::Path, session_id: &Option<String>
     }
 }
 
+/// Truncate to at most `n` characters, never splitting a multi-byte UTF-8
+/// sequence. The old byte-slice `&s[..500]` panicked whenever the cut point
+/// landed inside a CJK character — which is the common case for Chinese
+/// cluster names and messages — and took the whole agent session down.
+fn truncate_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 /// When the LLM doesn't produce a final text response (common with reasoning
 /// models that put everything in tool calls), construct a fallback summary from
 /// the tool results in the message history.
@@ -864,10 +872,10 @@ fn summarize_tool_results(messages: &[Message]) -> String {
                 } else {
                     // Generic: show a compact representation of the result.
                     let compact = k7s_deps::serde_json::to_string(&val).unwrap_or_default();
-                    if compact.len() <= 500 {
+                    if compact.chars().count() <= 500 {
                         summaries.push(compact);
                     } else {
-                        summaries.push(format!("{}…", &compact[..500]));
+                        summaries.push(format!("{}…", truncate_chars(&compact, 500)));
                     }
                 }
             } else {
@@ -1085,5 +1093,20 @@ mod tests {
     fn agent_loop_helpers_smoke() {
         // Ensure the factory + registry wire together without panicking.
         let _ = make_agent(vec![]);
+    }
+
+    #[test]
+    fn truncate_chars_never_splits_multibyte() {
+        // 1000 CJK chars = 3000 bytes; the old byte slice panicked here.
+        let cjk: String = "中".repeat(1000);
+        let head = truncate_chars(&cjk, 500);
+        assert_eq!(head.chars().count(), 500);
+        assert!(head.chars().all(|c| c == '中'));
+
+        // ASCII and mixed content stay exact for inputs within the limit.
+        assert_eq!(truncate_chars("abc", 5), "abc");
+        let mixed = format!("{}tail", "汉".repeat(496)); // exactly 500 chars
+        assert_eq!(truncate_chars(&mixed, 500), mixed);
+        assert_eq!(truncate_chars(&mixed, 4).chars().count(), 4);
     }
 }

@@ -269,12 +269,17 @@ pub async fn restart_workload_impl(
 }
 
 /// Delete a resource.
+///
+/// `ensure_writable` runs before the client is touched so the secrets/helm
+/// refusal surfaces even when no cluster is connected — same contract as
+/// `apply_manifest_impl`.
 pub async fn delete_resource_impl(
     manager: &ClientManager,
     kind: &str,
     namespace: &str,
     name: &str,
 ) -> AppResult<k7s_deps::serde_json::Value> {
+    shell_common::ensure_writable(kind)?;
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let (api, _) = shell_common::dynamic_api(client, kind, namespace, manager).await?;
     api.delete(name, &DeleteParams::default()).await?;
@@ -890,4 +895,41 @@ pub async fn kubectl_context_impl(
             "taint": "kubectl taint nodes {node} {key}={value}:{effect}",
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> ClientManager {
+        ClientManager::new(crate::core::events::EventSink::Mcp(
+            crate::core::events::McpEventSink::default(),
+        ))
+    }
+
+    /// `delete_resource_impl` must refuse the same read-only kinds as
+    /// `apply_manifest_impl` — the AI/MCP delete path used to bypass
+    /// `ensure_writable` entirely, letting the agent delete Secrets and
+    /// "Helm release" pseudo-resources.
+    #[tokio::test]
+    async fn delete_resource_refuses_secrets_and_helm() {
+        let mgr = manager();
+        for kind in ["secrets", "helm", "helmreleases"] {
+            let err = delete_resource_impl(&mgr, kind, "default", "x")
+                .await
+                .expect_err("read-only kinds must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Secret") || msg.contains("Helm"),
+                "kind {kind}: unexpected error {msg}"
+            );
+        }
+        // The refusal fires before the client is needed, so a disconnected
+        // manager still yields the policy error rather than Disconnected.
+        assert!(!delete_resource_impl(&mgr, "secrets", "default", "x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("connect"));
+    }
 }

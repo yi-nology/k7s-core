@@ -161,6 +161,17 @@ impl CronScheduler {
     }
 
     /// Record a run result.
+    /// Stamp `last_run` WITHOUT recording an outcome — used by the
+    /// background runner before executing, so the next tick can't re-fire
+    /// a run that's still in flight.
+    pub async fn mark_started(&self, task_id: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) {
+            task.last_run = Some(k7s_deps::chrono::Utc::now().to_rfc3339());
+        }
+        save_file(&self.data_dir, &state);
+    }
+
     pub async fn record_run(&self, result: CronRunResult) {
         let mut state = self.state.lock().await;
         // Update the task's last_run.
@@ -399,6 +410,199 @@ fn parse_field(field: &str, lo: u32, hi: u32) -> Result<Vec<u32>, String> {
 }
 
 /// Built-in scheduled task presets.
+// ---------------------------------------------------------------------------
+// Background scheduling loop
+// ---------------------------------------------------------------------------
+
+/// Headless [`agent::EventSink`] for scheduled runs: no UI, no approvals —
+/// every pending write is DENIED (nobody is awake at 03:00 to click
+/// approve, and auto-approving cluster mutations would be indefensible), so
+/// write tools fail closed while read-only analysis runs unattended.
+struct CronSink {
+    outcome: k7s_deps::tokio::sync::Mutex<Option<Result<String, String>>>,
+}
+
+impl crate::ai::agent::EventSink for CronSink {
+    fn emit(&self, ev: crate::ai::agent::AgentEvent) {
+        match ev {
+            crate::ai::agent::AgentEvent::Done { final_message, .. } => {
+                if let Ok(mut slot) = self.outcome.try_lock() {
+                    *slot = Some(Ok(final_message.unwrap_or_default()));
+                }
+            }
+            crate::ai::agent::AgentEvent::Error { message } => {
+                if let Ok(mut slot) = self.outcome.try_lock() {
+                    *slot = Some(Err(message));
+                }
+            }
+            _ => {}
+        }
+    }
+    fn await_approval(&self, _call_id: &str) -> k7s_deps::tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = k7s_deps::tokio::sync::oneshot::channel();
+        let _ = tx.send(false); // deny — headless run, no human in the loop
+        rx
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+/// What a due task should do. Implemented by the desktop/web shells by
+/// constructing an [`crate::ai::agent::AgentLoop`] from the saved AI config;
+/// kept as a closure so k7s-core stays independent of config resolution.
+pub type CronExecutor = std::sync::Arc<
+    dyn Fn(
+            CronTask,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Spawn the background cron loop: every 60s, collect due tasks and run
+/// them through `executor`, recording each outcome in the run history.
+/// `last_run` is stamped BEFORE execution so a slow run isn't re-fired by
+/// the next tick. Returns the JoinHandle (call `.abort()` to stop).
+pub fn spawn_runner(
+    data_dir: std::path::PathBuf,
+    executor: CronExecutor,
+) -> k7s_deps::tokio::task::JoinHandle<()> {
+    k7s_deps::tokio::spawn(async move {
+        let mut ticker = k7s_deps::tokio::time::interval(std::time::Duration::from_secs(60));
+        // First tick fires immediately; that's fine — due_tasks anchors on
+        // last_run, so nothing re-fires just because the process restarted.
+        loop {
+            ticker.tick().await;
+            let scheduler = CronScheduler::new(data_dir.clone());
+            for task in scheduler.due_tasks().await {
+                k7s_deps::tracing::info!(task = %task.id, name = %task.name, "cron: firing task");
+                // Stamp last_run now (without a result) so the next tick
+                // doesn't double-fire a run that's still in flight.
+                scheduler.mark_started(&task.id).await;
+                let started = std::time::Instant::now();
+                let result = executor(task.clone()).await;
+                let success = result.is_ok();
+                scheduler
+                    .record_run(CronRunResult {
+                        task_id: task.id.clone(),
+                        timestamp: k7s_deps::chrono::Utc::now().to_rfc3339(),
+                        success,
+                        response: result.unwrap_or_else(|e| format!("error: {e}")),
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    })
+                    .await;
+            }
+        }
+    })
+}
+
+/// Convenience executor built from the pieces every shell already has: an
+/// LLM factory and the resolved permission mode. Runs the task's prompt
+/// headlessly via [`CronSink`]. A fresh `ToolRegistry` + `AgentLoop` is
+/// built per invocation (cheap; `ToolRegistry` is not `Clone`).
+#[allow(clippy::too_many_arguments)]
+pub fn headless_executor(
+    llm_factory: std::sync::Arc<dyn Fn() -> Box<dyn crate::ai::llm::LlmClient> + Send + Sync>,
+    mode: crate::ai::config::PermissionMode,
+    max_turns: u32,
+    manager: std::sync::Arc<crate::kube::manager::ClientManager>,
+    data_dir: std::path::PathBuf,
+) -> CronExecutor {
+    std::sync::Arc::new(move |task: CronTask| {
+        let llm_factory = llm_factory.clone();
+        let manager = manager.clone();
+        let data_dir = data_dir.clone();
+        Box::pin(async move {
+            let agent = crate::ai::agent::AgentLoop::new(
+                crate::ai::tools::ToolRegistry::new(),
+                llm_factory,
+            );
+            let sink = std::sync::Arc::new(CronSink {
+                outcome: k7s_deps::tokio::sync::Mutex::new(None),
+            });
+            let req = crate::ai::agent::ChatRequest {
+                message: task.prompt.clone(),
+                history: Vec::new(),
+                context: None,
+                skill_id: task.skill_id.clone(),
+                kube_context: None,
+            };
+            agent
+                .run(req, mode, max_turns, manager, sink.clone(), data_dir, None)
+                .await;
+            let outcome = match sink.outcome.lock().await.take() {
+                Some(Ok(text)) => Ok(text),
+                Some(Err(e)) => Err(e),
+                None => Err("agent run produced no terminal event".to_string()),
+            };
+            outcome
+        })
+    })
+}
+
+/// Boot helper for the shells: load the saved AI config, build the headless
+/// executor, and spawn the background runner. If AI is disabled or no LLM
+/// can be resolved (no key, no local Ollama), log once and skip — scheduled
+/// tasks need a model to talk to.
+///
+/// `force_read_only` mirrors the web chat handler's safety downgrade: the
+/// web shell never lets a saved FullAuto config drive unattended writes.
+/// (Headless runs deny approvals regardless — see [`CronSink`].)
+pub async fn spawn_configured_runner(
+    data_dir: std::path::PathBuf,
+    manager: std::sync::Arc<crate::kube::manager::ClientManager>,
+    force_read_only: bool,
+) {
+    let view = match crate::ai::config::load(Some(&data_dir)) {
+        Ok(v) => v,
+        Err(e) => {
+            k7s_deps::tracing::warn!("cron: could not load AI config: {e}");
+            return;
+        }
+    };
+    let cfg = view.config;
+    if !cfg.enabled {
+        k7s_deps::tracing::info!("cron: AI assistant disabled — scheduler not started");
+        return;
+    }
+    let (base, model, key) = match crate::ai::config::resolve(&cfg, Some(&data_dir)) {
+        Ok(t) => t,
+        Err(_) => match crate::ai::embedded_models::discover_ollama(None).await {
+            Some(models) if !models.is_empty() => (
+                "http://localhost:11434/v1".to_string(),
+                models[0].name.clone(),
+                "ollama".to_string(),
+            ),
+            _ => {
+                k7s_deps::tracing::info!(
+                    "cron: no LLM configured (set an API key in Settings) — scheduler not started"
+                );
+                return;
+            }
+        },
+    };
+    let mode = if force_read_only {
+        crate::ai::config::PermissionMode::ReadOnly
+    } else {
+        cfg.permission
+    };
+    let temperature = cfg.provider.temperature;
+    let llm_factory: std::sync::Arc<dyn Fn() -> Box<dyn crate::ai::llm::LlmClient> + Send + Sync> =
+        std::sync::Arc::new(move || {
+            Box::new(crate::ai::llm::OpenAiClient::new(
+                base.clone(),
+                model.clone(),
+                key.clone(),
+                temperature,
+            ))
+        });
+    let runner_dir = data_dir.clone();
+    let executor = headless_executor(llm_factory, mode, cfg.max_turns, manager, data_dir);
+    let _handle = spawn_runner(runner_dir, executor);
+    k7s_deps::tracing::info!("cron: scheduler started (60s tick)");
+}
+
 pub fn builtin_presets() -> Vec<CronTask> {
     vec![
         CronTask {

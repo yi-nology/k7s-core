@@ -195,13 +195,18 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
 /// fired. Patterns without `=` (and keys absent from the args) fall back to a
 /// substring check on the serialized arguments, preserving the original loose
 /// behaviour for hand-written patterns.
+// cmp_owned is suppressed deliberately: serde_json::Value's PartialEq<&str>
+// only matches Value::String, so comparing numbers/bools to a pattern's
+// string REQUIRES the to_string() — clippy's direct-compare suggestion
+// would silently break `replicas=3` / `force=true` patterns.
+#[allow(clippy::cmp_owned)]
 fn arg_pattern_matches(pattern: &str, args: &k7s_deps::serde_json::Value) -> bool {
     if let Some((key, expected)) = pattern.split_once('=') {
         let (key, expected) = (key.trim(), expected.trim());
         match args.get(key) {
             Some(k7s_deps::serde_json::Value::String(s)) => s == expected,
             // Non-string scalars (numbers, bools) stringify for comparison.
-            Some(other) => &other.to_string() == expected,
+            Some(other) => other.to_string() == expected,
             None => k7s_deps::serde_json::to_string(args)
                 .unwrap_or_default()
                 .contains(pattern),

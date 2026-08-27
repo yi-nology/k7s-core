@@ -19,7 +19,8 @@
 //!
 //! Module layout: marketplace in [`market`], repo/rollback ops in [`ops`].
 
-#[cfg(not(target_os = "ios"))]
+// market shells out to the helm binary via ops — desktop/web only, like ops.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod market;
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

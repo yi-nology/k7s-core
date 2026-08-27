@@ -5,7 +5,9 @@
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod sbom;
 
-#[cfg(not(target_os = "ios"))]
+// sbom_storage persists what sbom generates; its only consumer
+// (k7s-commands/sbom) is also mobile-excluded.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod sbom_storage;
 
 #[cfg(not(target_os = "ios"))]

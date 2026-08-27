@@ -28,6 +28,8 @@ pub async fn list_resources_impl(
     kind: &str,
     namespace: &str,
     label_selector: Option<&str>,
+    limit: Option<i64>,
+    continue_token: Option<&str>,
 ) -> AppResult<k7s_deps::serde_json::Value> {
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let (api, _is_helm) = shell_common::dynamic_api(client, kind, namespace, manager).await?;
@@ -35,6 +37,16 @@ pub async fn list_resources_impl(
     if let Some(ls) = label_selector {
         if !ls.trim().is_empty() {
             lp = lp.labels(ls);
+        }
+    }
+    if let Some(n) = limit {
+        if n > 0 {
+            lp = lp.limit(n as u32);
+        }
+    }
+    if let Some(t) = continue_token {
+        if !t.trim().is_empty() {
+            lp = lp.continue_token(t);
         }
     }
     let list: k7s_deps::kube::api::ObjectList<DynamicObject> = api.list(&lp).await?;
@@ -48,7 +60,28 @@ pub async fn list_resources_impl(
             })
         })
         .collect();
-    Ok(k7s_deps::serde_json::json!(rows))
+    let next = list.metadata.continue_.clone();
+    Ok(paginate_rows(rows, next, limit))
+}
+
+/// Wire shape for [`list_resources_impl`]: a plain array when unpaginated
+/// (backward compatible with every existing caller), and
+/// `{"items": [...], "continue": "<token>"}` once pagination is in play so
+/// the model can page through large clusters instead of truncating
+/// silently. The token is absent (null) on the last page.
+fn paginate_rows(
+    rows: Vec<k7s_deps::serde_json::Value>,
+    continue_token: Option<String>,
+    limit: Option<i64>,
+) -> k7s_deps::serde_json::Value {
+    let paginated = limit.map(|n| n > 0).unwrap_or(false) || continue_token.is_some();
+    if !paginated {
+        return k7s_deps::serde_json::json!(rows);
+    }
+    k7s_deps::serde_json::json!({
+        "items": rows,
+        "continue": continue_token,
+    })
 }
 
 /// Redact Secret payloads in place. Kubernetes Secrets carry their sensitive

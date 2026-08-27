@@ -17,6 +17,7 @@
 //! Adding a tool: implement [`Tool`], then register it in [`ToolRegistry::new`].
 
 pub mod diag_tools;
+pub mod error_shape;
 pub mod impls;
 pub mod read_tools;
 pub mod write_tools;

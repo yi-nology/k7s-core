@@ -13,11 +13,13 @@ impl Tool for ListResources {
         "list_resources"
     }
     fn description(&self) -> &str {
-        "List Kubernetes resources of a given kind. Returns [{name, namespace, kind}]."
+        "List Kubernetes resources of a given kind. Returns [{name, namespace, kind}], or {items, continue} when paging with limit/continueToken on large clusters."
     }
     fn parameters_schema(&self) -> k7s_deps::serde_json::Value {
         k7s_deps::serde_json::json!({"type":"object","properties":{
-            "kind":{"type":"string"},"namespace":{"type":"string"},"label_selector":{"type":"string"}
+            "kind":{"type":"string"},"namespace":{"type":"string"},"label_selector":{"type":"string"},
+            "limit":{"type":"integer","description":"Page size (e.g. 100). On large clusters the response becomes {items, continue}."},
+            "continueToken":{"type":"string","description":"Opaque token from a previous page's `continue` field; returns the next page."}
         },"required":["kind"]})
     }
     async fn call(
@@ -28,9 +30,18 @@ impl Tool for ListResources {
         let kind = get_arg_str(&args, "kind")?;
         let ns = get_opt_str(&args, "namespace").unwrap_or_default();
         let label = get_opt_str(&args, "label_selector");
-        impls::list_resources_impl(&ctx.manager, &kind, &ns, label.as_deref())
-            .await
-            .map_err(|e| AiError::Tool(e.to_string()))
+        let limit = args.get("limit").and_then(|v| v.as_i64());
+        let continue_token = get_opt_str(&args, "continueToken");
+        impls::list_resources_impl(
+            &ctx.manager,
+            &kind,
+            &ns,
+            label.as_deref(),
+            limit,
+            continue_token.as_deref(),
+        )
+        .await
+        .map_err(|e| AiError::Tool(e.to_string()))
     }
 }
 
@@ -447,7 +458,9 @@ impl Tool for SpawnSubAgent {
         // If the task mentions specific resource types, list them.
         for kind in &["pods", "deployments", "nodes", "services"] {
             if lower.contains(kind) {
-                if let Ok(list) = impls::list_resources_impl(&ctx.manager, kind, "", None).await {
+                if let Ok(list) =
+                    impls::list_resources_impl(&ctx.manager, kind, "", None, None, None).await
+                {
                     results[format!("{}_list", kind)] = list;
                 }
             }

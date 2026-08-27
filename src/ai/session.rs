@@ -51,16 +51,16 @@ pub struct SessionMessage {
 /// and the last save would silently wipe the other's writes. Sharing the
 /// in-memory state per data_dir (first instance loads from disk, everyone
 /// else reuses it) makes every mutation + save globally serialized.
-static SESSION_STATES: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<Vec<Session>>>>>,
-> = std::sync::OnceLock::new();
+type SharedSessions = Arc<Mutex<Vec<Session>>>;
+static SESSION_STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, SharedSessions>>> =
+    std::sync::OnceLock::new();
 
-fn shared_sessions(data_dir: &PathBuf) -> Arc<Mutex<Vec<Session>>> {
+fn shared_sessions(data_dir: &std::path::Path) -> SharedSessions {
     let registry = SESSION_STATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     // Short critical section on the std Mutex — just the map lookup/insert;
     // the async lock on the sessions themselves is taken per operation.
     let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(data_dir.clone())
+    map.entry(data_dir.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(load_sessions(data_dir))))
         .clone()
 }

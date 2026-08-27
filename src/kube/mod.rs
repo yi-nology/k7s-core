@@ -12,7 +12,9 @@ pub mod drain;
 pub mod dto;
 pub mod endpoints;
 pub mod exec;
-#[cfg(not(target_os = "ios"))]
+// helm + restart compile everywhere: properties/watchers/shell_common
+// reference them unconditionally, and the iOS surface simply never exposes
+// the commands that call them (the k7s-commands layer owns that gate).
 pub mod helm;
 pub mod image;
 #[cfg(not(target_os = "ios"))]
@@ -34,7 +36,6 @@ pub mod pod_diagnosis;
 pub mod pod_files;
 pub mod portforward;
 pub mod properties;
-#[cfg(not(target_os = "ios"))]
 pub mod restart;
 pub mod rollout;
 pub mod security;

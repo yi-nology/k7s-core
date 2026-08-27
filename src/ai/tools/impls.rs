@@ -958,7 +958,7 @@ mod tests {
 
     fn manager() -> ClientManager {
         ClientManager::new(crate::core::events::EventSink::Mcp(
-            crate::core::events::McpEventSink::default(),
+            crate::core::events::McpEventSink,
         ))
     }
 

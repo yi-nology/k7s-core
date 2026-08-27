@@ -97,10 +97,10 @@ pub struct CronScheduler {
 static CRON_STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<CronFile>>>>> =
     std::sync::OnceLock::new();
 
-fn shared_cron_state(data_dir: &PathBuf) -> Arc<Mutex<CronFile>> {
+fn shared_cron_state(data_dir: &std::path::Path) -> Arc<Mutex<CronFile>> {
     let registry = CRON_STATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(data_dir.clone())
+    map.entry(data_dir.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(load_file(data_dir))))
         .clone()
 }
@@ -409,7 +409,6 @@ fn parse_field(field: &str, lo: u32, hi: u32) -> Result<Vec<u32>, String> {
     Ok(out)
 }
 
-/// Built-in scheduled task presets.
 // ---------------------------------------------------------------------------
 // Background scheduling loop
 // ---------------------------------------------------------------------------
@@ -603,6 +602,7 @@ pub async fn spawn_configured_runner(
     k7s_deps::tracing::info!("cron: scheduler started (60s tick)");
 }
 
+/// Built-in scheduled task presets.
 pub fn builtin_presets() -> Vec<CronTask> {
     vec![
         CronTask {

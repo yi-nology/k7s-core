@@ -60,6 +60,10 @@ pub async fn run_port_forward(
     let mut conns = JoinSet::new();
 
     while let Ok((mut tcp, _)) = listener.accept().await {
+        // Reap finished connections on every accept: without this the JoinSet
+        // retains every task it has ever spawned for the forward's lifetime,
+        // growing without bound on a long-lived port.
+        while conns.try_join_next().is_some() {}
         let api = api.clone();
         let pod = pod.clone();
         let errors = errors.clone();

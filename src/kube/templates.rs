@@ -51,6 +51,10 @@ pub async fn multi_apply(
     }
     let mut results = Vec::with_capacity(docs.len());
     let pp = PatchParams::apply("k7s");
+    // One discovery pass for the whole bundle. Discovery::run() walks every
+    // API group/version; running it per document (the old behaviour) made an
+    // N-doc template cost N full API walks before a single apply.
+    let groups = discover_groups(&client).await?;
     for doc in docs {
         let parsed: Result<DynamicObject, _> = k7s_deps::yaml_serde::from_str(&doc);
         let obj = match parsed {
@@ -72,7 +76,7 @@ pub async fn multi_apply(
             .ok_or_else(|| AppError::Other("document has no apiVersion/kind".into()))?;
         let gvk = GroupVersionKind::try_from(&tm)
             .map_err(|e| AppError::Other(format!("parse gvk: {e}")))?;
-        let (ar, namespaced) = resolve_api_resource(&client, &gvk).await?;
+        let (ar, namespaced) = resolve_api_resource(&groups, &gvk)?;
         let ns = obj
             .metadata
             .namespace
@@ -90,7 +94,19 @@ pub async fn multi_apply(
         // doesn't tell us create-vs-update cheaply, so we report a single
         // honest "applied" action.
         let action = match api.patch(&name, &pp, &Patch::Apply(obj)).await {
-            Ok(_) => "applied",
+            Ok(_) => {
+                // Audit identifiers only — never the manifest body. Borrowed:
+                // the values move into the ApplyResult below.
+                crate::core::audit::record(
+                    "apply",
+                    k7s_deps::serde_json::json!({
+                        "kind": &kind,
+                        "name": &name,
+                        "namespace": &ns,
+                    }),
+                );
+                "applied"
+            }
             Err(e) => {
                 results.push(ApplyResult {
                     name,
@@ -146,6 +162,8 @@ pub async fn multi_dry_run(
     // defaulting, mutating webhooks) without persisting — same semantics as the
     // single-doc dry_run_yaml, so the bundle preview matches a real apply.
     let pp = PatchParams::apply("k7s").dry_run();
+    // Shared discovery, as in `multi_apply`: one API walk for all documents.
+    let groups = discover_groups(&client).await?;
     for doc in docs {
         let parsed: Result<DynamicObject, _> = k7s_deps::yaml_serde::from_str(&doc);
         let obj = match parsed {
@@ -167,7 +185,7 @@ pub async fn multi_dry_run(
             .ok_or_else(|| AppError::Other("document has no apiVersion/kind".into()))?;
         let gvk = GroupVersionKind::try_from(&tm)
             .map_err(|e| AppError::Other(format!("parse gvk: {e}")))?;
-        let (ar, namespaced) = resolve_api_resource(&client, &gvk).await?;
+        let (ar, namespaced) = resolve_api_resource(&groups, &gvk)?;
         let ns = obj
             .metadata
             .namespace
@@ -231,17 +249,26 @@ fn split_documents(yaml: &str) -> Vec<String> {
     out
 }
 
-async fn resolve_api_resource(
+/// Run one full API discovery for a bundle. The result is shared by every
+/// document's `resolve_api_resource` lookup below.
+async fn discover_groups(
     client: &k7s_deps::kube::Client,
+) -> AppResult<k7s_deps::kube::discovery::Discovery> {
+    Ok(k7s_deps::kube::discovery::Discovery::new(client.clone())
+        .run()
+        .await?)
+}
+
+/// Resolve one document's GVK against already-discovered groups. We need a
+/// `Resource` mapping to learn plural + scope; doing this against a shared
+/// discovery (instead of a fresh `Discovery::run()` per document) keeps an
+/// N-doc bundle at one API walk.
+fn resolve_api_resource(
+    groups: &k7s_deps::kube::discovery::Discovery,
     gvk: &GroupVersionKind,
 ) -> AppResult<(ApiResource, bool)> {
-    // We need a `Resource` mapping to learn plural + scope. The dynamic-typed
-    // path in commands.rs does the same thing; we duplicate the call here
-    // because the resource resolution needs to happen per-doc and we don't
-    // want to entangle this with the kind table the watcher already uses.
-    use k7s_deps::kube::discovery::{Discovery, Scope};
-    let apigroups = Discovery::new(client.clone()).run().await?;
-    for group in apigroups.groups() {
+    use k7s_deps::kube::discovery::Scope;
+    for group in groups.groups() {
         if group.name() != gvk.group {
             continue;
         }

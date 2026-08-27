@@ -51,7 +51,31 @@ pub async fn list_resources_impl(
     Ok(k7s_deps::serde_json::json!(rows))
 }
 
-/// Describe a resource (structured JSON, managedFields stripped).
+/// Redact Secret payloads in place. Kubernetes Secrets carry their sensitive
+/// material in the `data` / `stringData` maps of the object body; every value is
+/// replaced with `***` so nothing sensitive leaks into LLM context, tool
+/// results, or the audit log. `kind` is the kind id the caller fetched (e.g.
+/// `"secrets"`); other kinds are a no-op.
+pub fn redact_secret_data(obj: &mut DynamicObject, kind: &str) {
+    if !kind.eq_ignore_ascii_case("secrets") {
+        return;
+    }
+    // DynamicObject.data is the whole object body; Kubernetes Secrets have
+    // `data` and optionally `stringData` keys inside it.
+    if let Some(map) = obj.data.as_object_mut() {
+        for key in &["data", "stringData"] {
+            if let Some(inner) = map.get_mut(*key) {
+                if let Some(inner_map) = inner.as_object_mut() {
+                    for v in inner_map.values_mut() {
+                        *v = k7s_deps::serde_json::Value::String("***".to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Describe a resource (structured JSON, managedFields stripped, secrets redacted).
 pub async fn describe_resource_impl(
     manager: &ClientManager,
     kind: &str,
@@ -62,6 +86,7 @@ pub async fn describe_resource_impl(
     let (api, _) = shell_common::dynamic_api(client, kind, namespace, manager).await?;
     let mut obj: DynamicObject = api.get(name).await?;
     obj.metadata.managed_fields = None;
+    redact_secret_data(&mut obj, kind);
     k7s_deps::serde_json::to_value(&obj).map_err(|e| AppError::Other(e.to_string()))
 }
 
@@ -76,21 +101,7 @@ pub async fn get_resource_yaml_impl(
     let (api, _) = shell_common::dynamic_api(client, kind, namespace, manager).await?;
     let mut obj: DynamicObject = api.get(name).await?;
     obj.metadata.managed_fields = None;
-    if kind == "secrets" {
-        // Redact secret data fields. DynamicObject.data is the whole object body;
-        // Kubernetes Secrets have `data` and optionally `stringData` keys inside it.
-        if let Some(map) = obj.data.as_object_mut() {
-            for key in &["data", "stringData"] {
-                if let Some(inner) = map.get_mut(*key) {
-                    if let Some(inner_map) = inner.as_object_mut() {
-                        for v in inner_map.values_mut() {
-                            *v = k7s_deps::serde_json::Value::String("***".to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
+    redact_secret_data(&mut obj, kind);
     k7s_deps::yaml_serde::to_string(&obj).map_err(|e| AppError::Yaml(e.to_string()))
 }
 
@@ -279,6 +290,12 @@ pub async fn delete_resource_impl(
     namespace: &str,
     name: &str,
 ) -> AppResult<k7s_deps::serde_json::Value> {
+    // Audit the attempt before anything can refuse it — "who tried to delete
+    // what" matters even (especially) when the write guard blocks it.
+    crate::core::audit::record(
+        "ai.delete",
+        k7s_deps::serde_json::json!({ "kind": kind, "name": name, "namespace": namespace }),
+    );
     shell_common::ensure_writable(kind)?;
     let client = manager.client().await.ok_or(AppError::Disconnected)?;
     let (api, _) = shell_common::dynamic_api(client, kind, namespace, manager).await?;
@@ -311,6 +328,11 @@ pub async fn apply_manifest_impl(
         Some(rk) => rk.id(),
         None => return Err(AppError::Other(format!("unsupported kind: {kind_str}"))),
     };
+    // Audit the attempt (with the parsed target) before mutating anything.
+    crate::core::audit::record(
+        "ai.apply",
+        k7s_deps::serde_json::json!({ "kind": kind_id, "name": name, "namespace": namespace }),
+    );
     shell_common::ensure_writable(kind_id)?;
     let (api, _) = shell_common::dynamic_api(client, kind_id, namespace, manager).await?;
     api.replace(&name, &PostParams::default(), &obj).await?;
@@ -931,5 +953,49 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("connect"));
+    }
+
+    /// `redact_secret_data` masks every `data`/`stringData` value of a Secret
+    /// and leaves other kinds (and other object fields) untouched — this is
+    /// the single choke point describe/get-yaml/batch-get rely on to keep
+    /// secret bytes out of LLM context.
+    #[test]
+    fn redact_secret_data_masks_secret_payloads() {
+        let mut secret: DynamicObject =
+            k7s_deps::serde_json::from_value(k7s_deps::serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": { "name": "db-creds", "namespace": "prod" },
+                "data": { "password": "cGFzc3dvcmQ=", "username": "YWRtaW4=" },
+                "stringData": { "token": "raw-token" },
+                "type": "Opaque"
+            }))
+            .unwrap();
+        redact_secret_data(&mut secret, "secrets");
+        let v = k7s_deps::serde_json::to_value(&secret).unwrap();
+        assert_eq!(v["data"]["password"], "***");
+        assert_eq!(v["data"]["username"], "***");
+        assert_eq!(v["stringData"]["token"], "***");
+        // Non-payload fields survive.
+        assert_eq!(v["metadata"]["name"], "db-creds");
+        assert_eq!(v["type"], "Opaque");
+
+        // Non-secret kinds are a no-op.
+        let mut cm: DynamicObject = k7s_deps::serde_json::from_value(k7s_deps::serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": "cfg" },
+            "data": { "keep": "me" }
+        }))
+        .unwrap();
+        redact_secret_data(&mut cm, "configmaps");
+        let v = k7s_deps::serde_json::to_value(&cm).unwrap();
+        assert_eq!(v["data"]["keep"], "me");
+
+        // Kind match is case-insensitive (callers may pass "Secrets").
+        let mut secret2 = secret.clone();
+        redact_secret_data(&mut secret2, "Secrets");
+        let v = k7s_deps::serde_json::to_value(&secret2).unwrap();
+        assert_eq!(v["data"]["password"], "***");
     }
 }

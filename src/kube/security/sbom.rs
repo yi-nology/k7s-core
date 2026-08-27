@@ -149,8 +149,8 @@ pub async fn generate_via_trivy(
             "image",
             "--format",
             format_flag,
-            "--output",
-            "/dev/stdout",
+            // trivy writes the report to stdout by default; an explicit
+            // `--output /dev/stdout` broke on Windows (no /dev/stdout device).
             "--quiet",
             "--timeout",
             timeout,
@@ -298,23 +298,74 @@ fn parse_trivy_components(
 // Generate SBOM via grype
 // ---------------------------------------------------------------------------
 
+/// Parse a Go-style duration string ("5m", "300s", "1h") into seconds.
+/// Unparseable or non-positive values fall back to 300s — the same default
+/// `SbomEngine` uses for trivy — so a malformed pref can't disable the
+/// wall-clock guard entirely.
+fn duration_str_to_secs(s: &str) -> u64 {
+    let t = s.trim();
+    // Split at the first non-digit character: "5m" → ("5", "m"), "300s" →
+    // ("300", "s"), "90" → ("90", "").
+    let split_at = t
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .unwrap_or(t.len());
+    let (digits, unit) = t.split_at(split_at);
+    let Ok(n) = digits.trim().parse::<u64>() else {
+        return 300;
+    };
+    if n == 0 {
+        return 300;
+    }
+    match unit {
+        "h" => n * 3600,
+        "m" => n * 60,
+        "ms" => 1,
+        // "s", or a bare number — treat as seconds.
+        _ => n,
+    }
+}
+
 /// Generate SBOM via grype.
+///
+/// Grype has no CycloneDX/SPDX output on its `-o` flag — its JSON encoder is
+/// grype's own schema (`matches[]` + `source`) — so we always ask for
+/// `-o json` and normalise in [`parse_grype_sbom`] regardless of the
+/// requested format.
 pub async fn generate_via_grype(
     grype_path: &str,
     image_ref: &str,
     format: &SbomFormat,
+    timeout: &str,
 ) -> AppResult<SbomResult> {
     let start = std::time::Instant::now();
-    let format_flag = match format {
-        SbomFormat::CycloneDx => "cyclonedx",
-        SbomFormat::Spdx => "spdx-json",
-    };
 
-    let output = Command::new(grype_path)
-        .args([image_ref, "-o", format_flag])
-        .output()
-        .await
+    // kill_on_drop + the wall-clock timeout below ensure a wedged grype
+    // (stuck image pull, hung DB refresh) can't pin the task forever: when
+    // the timeout cancels the wait future, the dropped child is killed.
+    let mut cmd = Command::new(grype_path);
+    cmd.args([image_ref, "-o", "json", "--timeout", timeout])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd
+        .spawn()
         .map_err(|e| AppError::Other(format!("Failed to run grype: {e}")))?;
+
+    // The wall clock sits a minute above grype's own soft timeout so the
+    // tool's error message (which names the phase it was in) wins whenever
+    // both would fire.
+    let wall = std::time::Duration::from_secs(duration_str_to_secs(timeout) + 60);
+    let output = match k7s_deps::tokio::time::timeout(wall, child.wait_with_output()).await {
+        Ok(res) => res.map_err(|e| AppError::Other(format!("Failed to run grype: {e}")))?,
+        Err(_) => {
+            return Err(AppError::Other(format!(
+                "grype scan timed out after {}s",
+                wall.as_secs()
+            )))
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -328,7 +379,12 @@ pub async fn generate_via_grype(
     parse_grype_sbom(&raw, image_ref, format, elapsed)
 }
 
-/// Parse grype JSON output into SbomResult.
+/// Parse grype's JSON output into SbomResult.
+///
+/// grype's `-o json` schema is: `matches` (one entry per vulnerability ×
+/// artifact pairing, each with `vulnerability` and `artifact`), `source`
+/// (the scanned image), and `descriptor` (grype's own name/version). There is
+/// no top-level `vulnerabilities` array — that was trivy's shape.
 fn parse_grype_sbom(
     raw: &str,
     image_ref: &str,
@@ -338,48 +394,78 @@ fn parse_grype_sbom(
     let value: k7s_deps::serde_json::Value = k7s_deps::serde_json::from_str(raw)
         .map_err(|e| AppError::Other(format!("Failed to parse grype output: {e}")))?;
 
+    // We can't honour the requested CycloneDX/SPDX shape (grype only emits
+    // its own JSON); the requested format is kept on the result for storage
+    // while the spec version stays the conventional default.
     let spec_version = match format {
-        SbomFormat::CycloneDx => value["specVersion"].as_str().unwrap_or("1.5").to_string(),
-        SbomFormat::Spdx => value["spdxVersion"]
-            .as_str()
-            .unwrap_or("SPDX-2.3")
-            .to_string(),
+        SbomFormat::CycloneDx => "1.5".to_string(),
+        SbomFormat::Spdx => "SPDX-2.3".to_string(),
     };
 
-    let components = parse_trivy_components(&value, format);
+    let matches = value["matches"].as_array().cloned().unwrap_or_default();
 
-    // grype SBOM output includes vulnerabilities in a separate array
-    let vulnerabilities = value["vulnerabilities"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|v| SbomVulnerability {
-                    id: v["id"].as_str().unwrap_or("").to_string(),
-                    severity: v["severity"].as_str().unwrap_or("unknown").to_string(),
-                    affected_components: v["artifacts"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|art| art["name"].as_str())
-                                .map(String::from)
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    description: v["description"].as_str().map(String::from),
-                    fixed_version: v["fix"]["versions"]
-                        .as_array()
-                        .and_then(|v| v.first())
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // One component per unique artifact (grype emits one match per
+    // vuln × package, so the same package appears many times).
+    let mut components: Vec<SbomComponent> = Vec::new();
+    let mut vulnerabilities: Vec<SbomVulnerability> = Vec::new();
+    for m in &matches {
+        let artifact = &m["artifact"];
+        let name = artifact["name"].as_str().unwrap_or("");
+        let version = artifact["version"].as_str().unwrap_or("");
+        if !name.is_empty()
+            && !components
+                .iter()
+                .any(|c| c.name == name && c.version == version)
+        {
+            components.push(SbomComponent {
+                name: name.to_string(),
+                version: version.to_string(),
+                purl: artifact["purl"].as_str().map(String::from),
+                cpe: artifact["cpe"].as_str().map(String::from),
+                component_type: artifact["type"].as_str().unwrap_or("library").to_string(),
+                licenses: artifact["licenses"]
+                    .as_array()
+                    .map(|l| {
+                        l.iter()
+                            .filter_map(|v| v["value"].as_str().or(v.as_str()))
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                supplier: None,
+                hashes: vec![],
+            });
+        }
+
+        let vuln = &m["vulnerability"];
+        vulnerabilities.push(SbomVulnerability {
+            id: vuln["id"].as_str().unwrap_or("").to_string(),
+            severity: vuln["severity"].as_str().unwrap_or("unknown").to_string(),
+            affected_components: vec![name.to_string()],
+            description: vuln["description"].as_str().map(String::from),
+            fixed_version: vuln["fix"]["versions"]
+                .as_array()
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        });
+    }
+
+    let tool_version = value["descriptor"]["version"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    // `source.target.userInput` is what grype was handed; prefer it over the
+    // caller's reference so a digest-pinned scan records the digest.
+    let resolved_ref = value["source"]["target"]["userInput"]
+        .as_str()
+        .unwrap_or(image_ref)
+        .to_string();
 
     Ok(SbomResult {
         id: Uuid::new_v4().to_string(),
         source: SbomSource::Image {
-            image_ref: image_ref.to_string(),
+            image_ref: resolved_ref,
             namespace: String::new(),
             pod: None,
         },
@@ -387,7 +473,7 @@ fn parse_grype_sbom(
         spec_version,
         metadata: SbomMetadata {
             tool: "grype".to_string(),
-            tool_version: "unknown".to_string(),
+            tool_version,
             scan_duration_ms: elapsed_ms,
         },
         components,
@@ -664,7 +750,7 @@ impl SbomEngine {
         }
         // Tier 2: grype
         if let Some(ref path) = self.grype_path {
-            match generate_via_grype(path, image_ref, format).await {
+            match generate_via_grype(path, image_ref, format, &self.timeout).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     k7s_deps::tracing::warn!("grype SBOM generation failed, falling back: {e}")
@@ -1006,6 +1092,112 @@ mod tests {
         let json = k7s_deps::serde_json::json!({});
         let components = parse_trivy_components(&json, &SbomFormat::CycloneDx);
         assert!(components.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_grype_sbom (grype's own JSON schema)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_grype_sbom_reads_matches_array() {
+        // Real grype `-o json` shape: one entry per vuln×artifact in
+        // `matches`, plus `source` and `descriptor`.
+        let json = k7s_deps::serde_json::json!({
+            "matches": [
+                {
+                    "vulnerability": {
+                        "id": "CVE-2023-99999",
+                        "severity": "High",
+                        "description": "A test vulnerability",
+                        "fix": { "versions": ["1.2.3-4"], "state": "fixed" },
+                        "urls": ["https://example.com/CVE-2023-99999"]
+                    },
+                    "artifact": {
+                        "name": "openssl",
+                        "version": "1.1.1k-1",
+                        "type": "apk",
+                        "purl": "pkg:apk/alpine/openssl@1.1.1k-1"
+                    }
+                },
+                {
+                    "vulnerability": {
+                        "id": "CVE-2024-11111",
+                        "severity": "Critical"
+                    },
+                    "artifact": {
+                        "name": "openssl",
+                        "version": "1.1.1k-1"
+                    }
+                }
+            ],
+            "source": {
+                "type": "image",
+                "target": {
+                    "userInput": "nginx:1.25",
+                    "imageID": "sha256:abc"
+                }
+            },
+            "descriptor": { "name": "grype", "version": "0.74.0" }
+        });
+        let result =
+            parse_grype_sbom(&json.to_string(), "nginx:1.25", &SbomFormat::CycloneDx, 42).unwrap();
+        assert_eq!(result.metadata.tool, "grype");
+        assert_eq!(result.metadata.tool_version, "0.74.0");
+        assert_eq!(result.metadata.scan_duration_ms, 42);
+        // One component per unique artifact, not one per match.
+        assert_eq!(result.components.len(), 1);
+        assert_eq!(result.components[0].name, "openssl");
+        assert_eq!(result.components[0].version, "1.1.1k-1");
+        assert_eq!(
+            result.components[0].purl.as_deref(),
+            Some("pkg:apk/alpine/openssl@1.1.1k-1")
+        );
+        assert_eq!(result.vulnerabilities.len(), 2);
+        assert_eq!(result.vulnerabilities[0].id, "CVE-2023-99999");
+        assert_eq!(result.vulnerabilities[0].severity, "High");
+        assert_eq!(
+            result.vulnerabilities[0].affected_components,
+            vec!["openssl".to_string()]
+        );
+        assert_eq!(
+            result.vulnerabilities[0].fixed_version.as_deref(),
+            Some("1.2.3-4")
+        );
+        assert_eq!(result.vulnerabilities[1].id, "CVE-2024-11111");
+        // `source.target.userInput` wins over the caller's reference.
+        assert!(
+            matches!(&result.source, SbomSource::Image { image_ref, .. } if image_ref == "nginx:1.25")
+        );
+    }
+
+    #[test]
+    fn parse_grype_sbom_handles_empty_matches() {
+        let json = k7s_deps::serde_json::json!({ "matches": [] });
+        let result =
+            parse_grype_sbom(&json.to_string(), "alpine:3.18", &SbomFormat::Spdx, 1).unwrap();
+        assert!(result.components.is_empty());
+        assert!(result.vulnerabilities.is_empty());
+        // No descriptor → unknown version, not a parse failure.
+        assert_eq!(result.metadata.tool_version, "unknown");
+    }
+
+    // -----------------------------------------------------------------------
+    // duration_str_to_secs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duration_str_to_secs_parses_go_style_units() {
+        assert_eq!(duration_str_to_secs("5m"), 300);
+        assert_eq!(duration_str_to_secs("300s"), 300);
+        assert_eq!(duration_str_to_secs("1h"), 3600);
+        assert_eq!(duration_str_to_secs("90"), 90);
+    }
+
+    #[test]
+    fn duration_str_to_secs_falls_back_to_default() {
+        assert_eq!(duration_str_to_secs(""), 300);
+        assert_eq!(duration_str_to_secs("0s"), 300);
+        assert_eq!(duration_str_to_secs("junk"), 300);
     }
 
     // -----------------------------------------------------------------------

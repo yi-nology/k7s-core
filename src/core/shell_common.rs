@@ -386,6 +386,8 @@ pub async fn spawn_shell_session(
     let ns_for_task = namespace.clone();
     let pod_for_task = pod.clone();
     let id_for_task = id.clone();
+    // Outlives the exec task, which takes ownership of `container`.
+    let container_for_audit = container.clone();
     let task = k7s_deps::tokio::spawn(async move {
         exec::run_shell(
             client,
@@ -411,6 +413,16 @@ pub async fn spawn_shell_session(
             },
         )
         .await;
+    // Audit identifiers only (no shell command/output).
+    crate::core::audit::record(
+        "shell.start",
+        k7s_deps::serde_json::json!({
+            "stream_id": &id,
+            "namespace": &namespace,
+            "pod": &pod,
+            "container": &container_for_audit,
+        }),
+    );
     Ok(ShellInfo {
         stream_id: id,
         namespace,
@@ -497,6 +509,16 @@ pub async fn spawn_node_shell_session(
             },
         )
         .await;
+    // Audit identifiers only — the node shell is root-equivalent on the host.
+    crate::core::audit::record(
+        "node_shell.start",
+        k7s_deps::serde_json::json!({
+            "stream_id": &id,
+            "node": &node_name,
+            "namespace": nodeshell::DEBUG_NAMESPACE,
+            "pod": &pod_name,
+        }),
+    );
     Ok(NodeShellInfo {
         stream_id: id,
         namespace: nodeshell::DEBUG_NAMESPACE.to_string(),
@@ -521,10 +543,24 @@ pub async fn spawn_log_stream(
     let stream_id = format!("{}-{}", pod, STREAM_SEQ.fetch_add(1, Ordering::Relaxed));
     let sink = manager.sink();
     let id_for_task = stream_id.clone();
+    // Outlive the stream task, which takes ownership of the originals.
+    let ns_for_audit = namespace.clone();
+    let pod_for_audit = pod.clone();
+    let container_for_audit = container.clone();
     let handle: JoinHandle<()> = k7s_deps::tokio::spawn(async move {
         logs::run_log_stream(client, sink, id_for_task, namespace, pod, container, opts).await;
     });
     manager.add_log(stream_id.clone(), handle).await;
+    // Audit identifiers only (never log content).
+    crate::core::audit::record(
+        "logs.start",
+        k7s_deps::serde_json::json!({
+            "stream_id": &stream_id,
+            "namespace": &ns_for_audit,
+            "pod": &pod_for_audit,
+            "container": &container_for_audit,
+        }),
+    );
     stream_id
 }
 
@@ -667,6 +703,13 @@ pub async fn restart_pod_core(
         )));
     }
     api.delete(name, &DeleteParams::default()).await?;
+    crate::core::audit::record(
+        "pod.restart",
+        k7s_deps::serde_json::json!({
+            "namespace": namespace,
+            "pod": name,
+        }),
+    );
     Ok(())
 }
 
@@ -688,6 +731,14 @@ pub async fn restart_rollout_core(
     let now = k7s_deps::chrono::Utc::now().to_rfc3339();
     let patch = Patch::Merge(crate::kube::restart::restart_patch(&now));
     api.patch(name, &PatchParams::default(), &patch).await?;
+    crate::core::audit::record(
+        "rollout.restart",
+        k7s_deps::serde_json::json!({
+            "kind": kind,
+            "namespace": namespace,
+            "name": name,
+        }),
+    );
     Ok(())
 }
 

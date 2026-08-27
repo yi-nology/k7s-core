@@ -56,11 +56,11 @@ impl std::error::Error for AiError {}
 
 impl From<AiError> for AppError {
     fn from(e: AiError) -> Self {
-        match e {
-            // Surface these as the existing disconnected-style user messages.
-            AiError::Disabled | AiError::NotConfigured(_) => AppError::Other(e.to_string()),
-            _ => AppError::Other(e.to_string()),
-        }
+        // AppError has no AI-specific variants worth mapping onto, and the
+        // AI taxonomy already carries user-appropriate messages in its
+        // Display — so every variant funnels through Other unchanged. (The
+        // old two-arm match mapped both arms to exactly this.)
+        AppError::Other(e.to_string())
     }
 }
 

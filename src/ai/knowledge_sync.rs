@@ -20,6 +20,21 @@ use k7s_deps::kube::api::{Api, ListParams};
 use k7s_deps::kube::ResourceExt;
 use std::sync::Arc;
 
+/// True when the vault already holds an entry with this fingerprint prefix.
+///
+/// Sync runs on every connect; without a dedup check each run appended a
+/// fresh copy of every ConfigMap doc / annotation and `memory.json` grew
+/// without bound. Fingerprints are the stable `[Doc: ns/name/key]`-style
+/// prefixes the sync itself writes, so an unchanged source is idempotent
+/// while a changed one can be re-imported after the user clears the old
+/// entry (or we later add replace semantics).
+fn vault_has_fingerprint(store: &MemoryStore, fingerprint: &str) -> bool {
+    store
+        .list(None)
+        .iter()
+        .any(|e| e.content.starts_with(fingerprint))
+}
+
 /// Sync knowledge from the connected cluster into the Knowledge Vault.
 pub async fn sync_from_cluster(
     manager: &Arc<ClientManager>,
@@ -42,9 +57,13 @@ pub async fn sync_from_cluster(
                 let name = cm.name_any();
                 let ns = cm.metadata.namespace.clone().unwrap_or_default();
                 for (key, value) in cm.data.as_ref().into_iter().flat_map(|m| m.iter()) {
+                    let fingerprint = format!("[Doc: {ns}/{name}/{key}]");
+                    if vault_has_fingerprint(&store, &fingerprint) {
+                        continue; // already imported on an earlier sync
+                    }
                     store.add(
                         Tier::KnowledgeVault,
-                        &format!("[Doc: {ns}/{name}/{key}] {value}"),
+                        &format!("{fingerprint} {value}"),
                         vec!["docs".into(), ns.clone(), name.clone()],
                         MemorySource::Ai,
                     );
@@ -64,22 +83,28 @@ pub async fn sync_from_cluster(
                 let ns = pod.metadata.namespace.clone().unwrap_or_default();
                 let annotations = pod.metadata.annotations.clone().unwrap_or_default();
                 if let Some(runbook) = annotations.get("k7s.ai/runbook") {
-                    store.add(
-                        Tier::KnowledgeVault,
-                        &format!("[Runbook: {ns}/{name}] {runbook}"),
-                        vec!["runbook".into(), ns.clone(), name.clone()],
-                        MemorySource::Ai,
-                    );
-                    report.pod_annotations += 1;
+                    let fingerprint = format!("[Runbook: {ns}/{name}]");
+                    if !vault_has_fingerprint(&store, &fingerprint) {
+                        store.add(
+                            Tier::KnowledgeVault,
+                            &format!("{fingerprint} {runbook}"),
+                            vec!["runbook".into(), ns.clone(), name.clone()],
+                            MemorySource::Ai,
+                        );
+                        report.pod_annotations += 1;
+                    }
                 }
                 if let Some(desc) = annotations.get("k7s.ai/description") {
-                    store.add(
-                        Tier::KnowledgeVault,
-                        &format!("[Description: {ns}/{name}] {desc}"),
-                        vec!["description".into(), ns.clone(), name.clone()],
-                        MemorySource::Ai,
-                    );
-                    report.pod_annotations += 1;
+                    let fingerprint = format!("[Description: {ns}/{name}]");
+                    if !vault_has_fingerprint(&store, &fingerprint) {
+                        store.add(
+                            Tier::KnowledgeVault,
+                            &format!("{fingerprint} {desc}"),
+                            vec!["description".into(), ns.clone(), name.clone()],
+                            MemorySource::Ai,
+                        );
+                        report.pod_annotations += 1;
+                    }
                 }
             }
         }
@@ -95,13 +120,16 @@ pub async fn sync_from_cluster(
                 let ns = dep.metadata.namespace.clone().unwrap_or_default();
                 let annotations = dep.metadata.annotations.clone().unwrap_or_default();
                 if let Some(runbook) = annotations.get("k7s.ai/runbook") {
-                    store.add(
-                        Tier::KnowledgeVault,
-                        &format!("[Deployment Runbook: {ns}/{name}] {runbook}"),
-                        vec!["runbook".into(), "deployment".into(), ns.clone()],
-                        MemorySource::Ai,
-                    );
-                    report.deploy_annotations += 1;
+                    let fingerprint = format!("[Deployment Runbook: {ns}/{name}]");
+                    if !vault_has_fingerprint(&store, &fingerprint) {
+                        store.add(
+                            Tier::KnowledgeVault,
+                            &format!("{fingerprint} {runbook}"),
+                            vec!["runbook".into(), "deployment".into(), ns.clone()],
+                            MemorySource::Ai,
+                        );
+                        report.deploy_annotations += 1;
+                    }
                 }
             }
         }
@@ -148,4 +176,74 @@ pub struct SyncReport {
     pub pod_annotations: usize,
     pub deploy_annotations: usize,
     pub errors: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store(tag: &str) -> MemoryStore {
+        let dir = std::env::temp_dir().join(format!(
+            "k7s-ai-test-knowledge-{tag}-{}",
+            k7s_deps::uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        MemoryStore::open(&dir, "test-context")
+    }
+
+    /// Importing the same ConfigMap doc fingerprint twice must not duplicate
+    /// the vault entry — sync runs on every connect and used to grow
+    /// memory.json without bound.
+    #[test]
+    fn fingerprint_dedup_prevents_reimport() {
+        let mut store = temp_store("dedup");
+        let fingerprint = "[Doc: kube-system/ops-runbook/install.md]";
+
+        // First import: not present yet.
+        assert!(!vault_has_fingerprint(&store, fingerprint));
+        store.add(
+            Tier::KnowledgeVault,
+            &format!("{fingerprint} step 1. cordon the node"),
+            vec!["docs".into()],
+            MemorySource::Ai,
+        );
+        assert!(vault_has_fingerprint(&store, fingerprint));
+
+        // The import loop's guard: a second pass would skip this add.
+        let count_before = store.list(Some(Tier::KnowledgeVault)).len();
+        if !vault_has_fingerprint(&store, fingerprint) {
+            store.add(
+                Tier::KnowledgeVault,
+                &format!("{fingerprint} step 1. cordon the node"),
+                vec!["docs".into()],
+                MemorySource::Ai,
+            );
+        }
+        assert_eq!(
+            store.list(Some(Tier::KnowledgeVault)).len(),
+            count_before,
+            "re-sync of the same fingerprint must not add a copy"
+        );
+
+        // A different fingerprint still imports.
+        assert!(!vault_has_fingerprint(&store, "[Doc: default/other/key]"));
+    }
+
+    /// Prefix matching must not over-match: `[Doc: ns/name/k]` should not be
+    /// satisfied by `[Doc: ns/name/key2]`... but it IS a prefix — so the
+    /// fingerprint includes the closing `]`, which terminates the key.
+    #[test]
+    fn fingerprint_is_exact_up_to_bracket() {
+        let mut store = temp_store("exact");
+        store.add(
+            Tier::KnowledgeVault,
+            "[Doc: default/app/config] the original",
+            vec![],
+            MemorySource::Ai,
+        );
+        // Same key → present.
+        assert!(vault_has_fingerprint(&store, "[Doc: default/app/config]"));
+        // Different key whose name is a prefix of the stored one → absent.
+        assert!(!vault_has_fingerprint(&store, "[Doc: default/app/conf]"));
+    }
 }

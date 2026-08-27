@@ -137,7 +137,11 @@ pub async fn run_op(op: HelmOp, sink: EventSink) -> AppResult<HelmOpResult> {
         )
     })?;
 
-    let (label, argv) = build_argv(&helm_path, &op)?;
+    // Guards for every temp credential/values file this op creates. They live
+    // here (not inside `build_argv`) so they drop only when `run_op` returns —
+    // after helm has finished reading them.
+    let mut temp_files: Vec<TempHelmFile> = Vec::new();
+    let (label, argv) = build_argv(&helm_path, &op, &mut temp_files)?;
     let (release, namespace) = op_release_ns(&op);
 
     let mut cmd = Command::new(&helm_path);
@@ -153,10 +157,12 @@ pub async fn run_op(op: HelmOp, sink: EventSink) -> AppResult<HelmOpResult> {
         );
 
     if let Some(kc) = op_kubeconfig(&op) {
-        // Write the kubeconfig to a temp file (helm needs a path, not a blob).
-        // We use a deterministic name so a stuck install can be located.
-        let kc_path = write_temp_kubeconfig(&kc)?;
-        cmd.env("KUBECONFIG", &kc_path);
+        // Write the kubeconfig to a 0600 temp file (helm needs a path, not a
+        // blob). The guard deletes it when `run_op` returns so the credential
+        // never outlives the operation.
+        let kc_file = write_temp_kubeconfig(&kc)?;
+        cmd.env("KUBECONFIG", kc_file.path());
+        temp_files.push(kc_file);
     }
 
     // Spawn.
@@ -243,7 +249,11 @@ pub async fn run_op(op: HelmOp, sink: EventSink) -> AppResult<HelmOpResult> {
 // Argv construction
 // ---------------------------------------------------------------------------
 
-fn build_argv(helm_path: &str, op: &HelmOp) -> AppResult<(&'static str, Vec<String>)> {
+fn build_argv(
+    helm_path: &str,
+    op: &HelmOp,
+    temp_files: &mut Vec<TempHelmFile>,
+) -> AppResult<(&'static str, Vec<String>)> {
     let _ = helm_path;
     let mut argv: Vec<String> = Vec::new();
     let label: &'static str;
@@ -267,7 +277,7 @@ fn build_argv(helm_path: &str, op: &HelmOp) -> AppResult<(&'static str, Vec<Stri
                 argv.push("--dry-run".into());
                 argv.push("--debug".into()); // dry-run alone suppresses most output
             }
-            push_values_args(&mut argv, &args.values);
+            push_values_args(&mut argv, &args.values, temp_files);
         }
         HelmOp::Upgrade(args) => {
             label = "upgrade";
@@ -290,7 +300,7 @@ fn build_argv(helm_path: &str, op: &HelmOp) -> AppResult<(&'static str, Vec<Stri
                 argv.push("--dry-run".into());
                 argv.push("--debug".into());
             }
-            push_values_args(&mut argv, &args.values);
+            push_values_args(&mut argv, &args.values, temp_files);
         }
         HelmOp::Uninstall(args) => {
             label = "uninstall";
@@ -298,9 +308,9 @@ fn build_argv(helm_path: &str, op: &HelmOp) -> AppResult<(&'static str, Vec<Stri
             argv.push(args.release.clone());
             argv.push("--namespace".into());
             argv.push(args.namespace.clone());
-            if !args.keep_history {
-                // Default is to keep history; the UI offers the choice so the
-                // user can decide whether a rollback remains possible.
+            if args.keep_history {
+                // Helm deletes release history by default; --keep-history
+                // opts out so a rollback stays possible after uninstall.
                 argv.push("--keep-history".into());
             }
         }
@@ -322,7 +332,7 @@ fn build_argv(helm_path: &str, op: &HelmOp) -> AppResult<(&'static str, Vec<Stri
     Ok((label, argv))
 }
 
-fn push_values_args(argv: &mut Vec<String>, values: &str) {
+fn push_values_args(argv: &mut Vec<String>, values: &str, temp_files: &mut Vec<TempHelmFile>) {
     if values.trim().is_empty() {
         return;
     }
@@ -331,24 +341,21 @@ fn push_values_args(argv: &mut Vec<String>, values: &str) {
     //      snippets; quoting is hell.
     //   2. Write to a temp file and pass `--values <path>`. Correct for any
     //      size, no escaping.
-    // We go with (2) and stash the path in a process-wide table keyed by the
-    // file name. The Tauri command writes the values, then invokes `run_op`,
-    // which receives the *path* via a sibling struct field; in this code path
-    // we expect the caller to have already written it. For the common case
-    // where the user supplies raw values text, we accept the *contents* here
-    // and the Tauri command writes to a known temp path before calling in.
-    //
-    // To keep the API here honest, the Tauri command passes the file *path*
-    // in `args.values` by writing a sentinel `__file:<path>` prefix. Strip it.
+    // We go with (2). The Tauri command may have already written the values
+    // itself and passes the *path* via a `__file:<path>` sentinel; strip it —
+    // that file is caller-managed, so no guard is taken for it.
     if let Some(path) = values.strip_prefix("__file:") {
         argv.push("--values".into());
         argv.push(path.to_string());
     } else {
-        // Inline fallback: write a temp file now.
+        // Inline fallback: write a temp file now. Its guard moves into
+        // `temp_files` so the file survives until the op finishes (helm reads
+        // it after `run_op` spawns the process).
         match write_temp_values(values) {
-            Ok(path) => {
+            Ok(guard) => {
                 argv.push("--values".into());
-                argv.push(path.display().to_string());
+                argv.push(guard.path().display().to_string());
+                temp_files.push(guard);
             }
             Err(e) => {
                 k7s_deps::tracing::warn!("could not write values temp file: {e}; --values omitted");
@@ -397,36 +404,69 @@ pub(crate) fn which_helm() -> Option<String> {
     None
 }
 
-fn write_temp_kubeconfig(content: &str) -> AppResult<PathBuf> {
-    let dir = std::env::temp_dir().join("k7s-helm");
-    std::fs::create_dir_all(&dir).map_err(|e| AppError::Other(format!("create tmp dir: {e}")))?;
-    let path = dir.join(format!("kc-{}.yaml", std::process::id()));
-    std::fs::write(&path, content)
-        .map_err(|e| AppError::Other(format!("write kubeconfig: {e}")))?;
-    // Best-effort chmod 0600 — kubeconfigs are credentials.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&path)
-            .map_err(|e| AppError::Other(format!("stat kubeconfig: {e}")))?
-            .permissions();
-        perms.set_mode(0o600);
-        let _ = std::fs::set_permissions(&path, perms);
-    }
-    Ok(path)
+/// RAII guard over a temp file holding helm credentials or chart values.
+///
+/// The previous helpers returned plain paths and left deletion to the caller,
+/// so any early return between write and cleanup leaked a kubeconfig in the
+/// temp dir. Mirrors `image::sync::AuthFileGuard`: the file is created with
+/// `create_new` and mode 0600 (atomic on unix — no chmod window where the
+/// credential is world-readable), the uuid suffix keeps concurrent ops from
+/// clobbering each other, and `Drop` removes it on every exit path.
+struct TempHelmFile {
+    path: PathBuf,
 }
 
-fn write_temp_values(content: &str) -> AppResult<PathBuf> {
-    let dir = std::env::temp_dir().join("k7s-helm");
-    std::fs::create_dir_all(&dir).map_err(|e| AppError::Other(format!("create tmp dir: {e}")))?;
-    // Random suffix so two concurrent installs don't clobber each other.
-    let suffix: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let path = dir.join(format!("values-{suffix}.yaml"));
-    std::fs::write(&path, content).map_err(|e| AppError::Other(format!("write values: {e}")))?;
-    Ok(path)
+impl TempHelmFile {
+    fn create(kind: &str, ext: &str, content: &str) -> AppResult<Self> {
+        let dir = std::env::temp_dir().join("k7s-helm");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| AppError::Other(format!("create tmp dir: {e}")))?;
+        let path = dir.join(format!("{kind}-{}.{ext}", k7s_deps::uuid::Uuid::new_v4()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 from the moment the inode exists: a kubeconfig is a
+            // credential, and setting permissions after creation would leave
+            // a window where other local users can read it.
+            opts.mode(0o600);
+        }
+        use std::io::Write as _;
+        let mut file = opts
+            .open(&path)
+            .map_err(|e| AppError::Other(format!("create {kind} temp file: {e}")))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| AppError::Other(format!("write {kind} temp file: {e}")))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempHelmFile {
+    fn drop(&mut self) {
+        // Best-effort: a missing file is fine (already reaped); anything else
+        // is logged — Drop can't propagate errors.
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                k7s_deps::tracing::warn!(
+                    "failed to remove helm temp file {}: {e}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
+fn write_temp_kubeconfig(content: &str) -> AppResult<TempHelmFile> {
+    TempHelmFile::create("kc", "yaml", content)
+}
+
+fn write_temp_values(content: &str) -> AppResult<TempHelmFile> {
+    TempHelmFile::create("values", "yaml", content)
 }
 
 #[derive(Serialize, Clone)]
@@ -473,9 +513,11 @@ pub async fn release_history(
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    if let Some(kc) = kubeconfig {
-        let path = write_temp_kubeconfig(kc)?;
-        cmd.env("KUBECONFIG", &path);
+    // Guard must outlive `cmd.output()` below — helm reads the kubeconfig
+    // while the process runs; it drops (deleting the file) after the result.
+    let kc_guard = kubeconfig.map(write_temp_kubeconfig).transpose()?;
+    if let Some(g) = &kc_guard {
+        cmd.env("KUBECONFIG", g.path());
     }
     let out = cmd
         .output()
@@ -540,9 +582,10 @@ pub async fn render_default_values(
     if !version.is_empty() {
         cmd.arg("--version").arg(version);
     }
-    if let Some(kc) = kubeconfig {
-        let path = write_temp_kubeconfig(kc)?;
-        cmd.env("KUBECONFIG", &path);
+    // Same lifetime rule as `release_history`: guard drops after `output()`.
+    let kc_guard = kubeconfig.map(write_temp_kubeconfig).transpose()?;
+    if let Some(g) = &kc_guard {
+        cmd.env("KUBECONFIG", g.path());
     }
     let out = cmd
         .output()
@@ -555,4 +598,120 @@ pub async fn render_default_values(
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--keep-history` must appear only when the user asked to keep it:
+    /// helm's own default is to delete release history, and the previous
+    /// inverted condition silently did the opposite of the checkbox.
+    #[test]
+    fn uninstall_argv_keep_history_only_when_requested() {
+        let keep = HelmOp::Uninstall(UninstallArgs {
+            release: "rel".into(),
+            namespace: "ns".into(),
+            kubeconfig: None,
+            keep_history: true,
+        });
+        let (_, argv) = build_argv("helm", &keep, &mut Vec::new()).unwrap();
+        assert!(argv.contains(&"--keep-history".into()));
+
+        let drop_history = HelmOp::Uninstall(UninstallArgs {
+            release: "rel".into(),
+            namespace: "ns".into(),
+            kubeconfig: None,
+            keep_history: false,
+        });
+        let (_, argv) = build_argv("helm", &drop_history, &mut Vec::new()).unwrap();
+        assert!(!argv.contains(&"--keep-history".into()));
+    }
+
+    /// Inline values land in a guarded temp file whose path goes on the argv;
+    /// the guard is handed to the caller so the file survives spawn.
+    #[test]
+    fn install_argv_uses_guarded_values_file() {
+        let op = HelmOp::Install(InstallArgs {
+            release: "rel".into(),
+            chart: "ingress-nginx/ingress-nginx".into(),
+            version: String::new(),
+            namespace: "ns".into(),
+            kubeconfig: None,
+            values: "replicaCount: 2".into(),
+            dry_run: false,
+            create_namespace: false,
+        });
+        let mut guards = Vec::new();
+        let (_, argv) = build_argv("helm", &op, &mut guards).unwrap();
+        assert!(argv.contains(&"--values".into()));
+        assert_eq!(guards.len(), 1);
+        assert!(guards[0].path().exists());
+        // guards drop here, removing the file
+    }
+
+    /// The sentinel path passes straight through without creating a file.
+    #[test]
+    fn install_argv_file_sentinel_passthrough() {
+        let op = HelmOp::Install(InstallArgs {
+            release: "rel".into(),
+            chart: "foo/bar".into(),
+            version: String::new(),
+            namespace: "ns".into(),
+            kubeconfig: None,
+            values: "__file:/tmp/pre-written.yaml".into(),
+            dry_run: false,
+            create_namespace: false,
+        });
+        let mut guards = Vec::new();
+        let (_, argv) = build_argv("helm", &op, &mut guards).unwrap();
+        assert!(argv.contains(&"/tmp/pre-written.yaml".into()));
+        assert!(guards.is_empty());
+    }
+
+    /// Credentials must not outlive their guard: the temp kubeconfig exists
+    /// while the guard is alive and is removed the moment it drops.
+    #[test]
+    fn temp_kubeconfig_removed_on_drop() {
+        let (path, guard) = {
+            let guard = write_temp_kubeconfig("apiVersion: v1\n").unwrap();
+            assert!(guard.path().exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(guard.path())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "kubeconfig must be owner-only");
+            }
+            (guard.path().to_path_buf(), guard)
+        };
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    /// Same contract for the values temp file.
+    #[test]
+    fn temp_values_removed_on_drop() {
+        let path = {
+            let guard = write_temp_values("foo: bar\n").unwrap();
+            let p = guard.path().to_path_buf();
+            assert!(p.exists());
+            p
+        };
+        assert!(!path.exists(), "guard dropped at end of block above");
+    }
+
+    /// Concurrent ops must not share a temp file: uuid suffixes are distinct.
+    #[test]
+    fn temp_files_for_concurrent_ops_are_distinct() {
+        let a = write_temp_kubeconfig("x").unwrap();
+        let b = write_temp_kubeconfig("x").unwrap();
+        assert_ne!(a.path(), b.path());
+    }
 }

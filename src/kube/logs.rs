@@ -200,14 +200,30 @@ async fn stream_all(
         let tx = tx.clone();
         let pod_name = pod.to_string();
         readers.spawn(async move {
-            if let Ok(reader) = api.log_stream(&pod_name, &lp).await {
-                let mut lines = reader.lines();
-                while let Some(Ok(raw)) = lines.next().await {
-                    let mut line = parse_log_line(&raw);
-                    line.container = container.clone();
-                    if tx.send(line).await.is_err() {
-                        break; // batcher gone
+            match api.log_stream(&pod_name, &lp).await {
+                Ok(reader) => {
+                    let mut lines = reader.lines();
+                    while let Some(Ok(raw)) = lines.next().await {
+                        let mut line = parse_log_line(&raw);
+                        line.container = container.clone();
+                        if tx.send(line).await.is_err() {
+                            break; // batcher gone
+                        }
                     }
+                }
+                // A failed container must not vanish silently from an
+                // all-containers stream — the other containers keep flowing,
+                // so the failure looks like "no logs". Surface it as an
+                // ERROR line through the same batch channel/sink.
+                Err(e) => {
+                    let _ = tx
+                        .send(LogLine {
+                            ts: String::new(),
+                            level: "ERROR",
+                            msg: format!("log stream for container '{container}' failed: {e}"),
+                            container: container.clone(),
+                        })
+                        .await;
                 }
             }
         });

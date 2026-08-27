@@ -119,17 +119,7 @@ impl HttpClient {
 // ---------------------------------------------------------------------------
 
 fn config_path() -> AppResult<PathBuf> {
-    let dir = match std::env::var_os("HOME") {
-        Some(h) => std::path::PathBuf::from(h).join(if cfg!(target_os = "macos") {
-            "Library/Application Support/k7s"
-        } else {
-            ".config/k7s"
-        }),
-        None => return Err(AppError::Other("no HOME".into())),
-    };
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::Other(format!("mkdir {}: {e}", dir.display())))?;
-    Ok(dir.join("image-registries.json"))
+    Ok(crate::kube::user_config_dir()?.join("image-registries.json"))
 }
 
 fn load_file() -> AppResult<RegistryFile> {
@@ -288,50 +278,82 @@ pub async fn test_connect(reg: &ImageRegistry) -> AppResult<()> {
     }
 }
 
+/// Upper bound on entries fetched while following `Link` pagination — stops
+/// a pathological (or hostile) registry from making us page forever.
+const PAGINATION_LIMIT: usize = 1000;
+/// Hard cap on pages per call, for registries that keep returning the same
+/// `rel="next"` target.
+const MAX_PAGES: usize = 100;
+
 /// List repositories. Hits `/v2/_catalog`. Some registries (Docker Hub) do
 /// not implement this — the response will be 404, which we surface as a
 /// "browse unsupported" error so the UI can offer a typed-name input.
+///
+/// Follows RFC 5988 `Link: <...>; rel="next"` pagination: paging registries
+/// (Harbor, distribution) otherwise silently truncate the list at the first
+/// page, which looks like a missing repository.
 pub async fn list_repositories(reg: &ImageRegistry) -> AppResult<Vec<RepoEntry>> {
     let client = HttpClient::build(reg.insecure);
-    let url = format!("{}/v2/_catalog?n=200", reg.url);
-    let resp = authed_get(&client, reg, &url).await?;
-    let status = resp.status();
-    if status.as_u16() == 404 {
-        return Err(AppError::Other(format!(
-            "registry {} does not support catalog browsing; type a repository name",
-            reg.name
-        )));
+    let mut names: Vec<String> = Vec::new();
+    let mut url = format!("{}/v2/_catalog?n=100", reg.url);
+    let mut pages = 0usize;
+    loop {
+        let resp = authed_get(&client, reg, &url).await?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Err(AppError::Other(format!(
+                "registry {} does not support catalog browsing; type a repository name",
+                reg.name
+            )));
+        }
+        if !status.is_success() {
+            return Err(AppError::Other(format!("catalog: HTTP {status}")));
+        }
+        let next = next_link(&resp);
+        let body: CatalogResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Other(format!("decode catalog: {e}")))?;
+        names.extend(body.repositories);
+        pages += 1;
+        match next {
+            Some(n) if names.len() < PAGINATION_LIMIT && pages < MAX_PAGES => {
+                url = resolve_next(&reg.url, &n)
+            }
+            _ => break,
+        }
     }
-    if !status.is_success() {
-        return Err(AppError::Other(format!("catalog: HTTP {status}")));
-    }
-    let body: CatalogResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Other(format!("decode catalog: {e}")))?;
-    Ok(body
-        .repositories
-        .into_iter()
-        .map(|name| RepoEntry { name })
-        .collect())
+    Ok(names.into_iter().map(|name| RepoEntry { name }).collect())
 }
 
 /// List tags for one repository. Universal — every registry implements it.
+/// Follows `Link` pagination like [`list_repositories`], with the same caps.
 pub async fn list_tags(reg: &ImageRegistry, repo: &str) -> AppResult<Vec<TagEntry>> {
     let client = HttpClient::build(reg.insecure);
-    let url = format!("{}/v2/{}/tags/list?n=200", reg.url, repo);
-    let resp = authed_get(&client, reg, &url).await?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(AppError::Other(format!("tags: HTTP {status}")));
+    let mut tags: Vec<String> = Vec::new();
+    let mut url = format!("{}/v2/{}/tags/list?n=100", reg.url, repo);
+    let mut pages = 0usize;
+    loop {
+        let resp = authed_get(&client, reg, &url).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(AppError::Other(format!("tags: HTTP {status}")));
+        }
+        let next = next_link(&resp);
+        let body: TagsResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Other(format!("decode tags: {e}")))?;
+        tags.extend(body.tags.unwrap_or_default());
+        pages += 1;
+        match next {
+            Some(n) if tags.len() < PAGINATION_LIMIT && pages < MAX_PAGES => {
+                url = resolve_next(&reg.url, &n)
+            }
+            _ => break,
+        }
     }
-    let body: TagsResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Other(format!("decode tags: {e}")))?;
-    Ok(body
-        .tags
-        .unwrap_or_default()
+    Ok(tags
         .into_iter()
         .map(|name| TagEntry {
             name,
@@ -340,6 +362,53 @@ pub async fn list_tags(reg: &ImageRegistry, repo: &str) -> AppResult<Vec<TagEntr
             created: None,
         })
         .collect())
+}
+
+/// Extract the target of an RFC 5988 `Link: <url>; rel="next"` header, if the
+/// response carries one. Registries may emit several link relations; only the
+/// `next` one continues pagination.
+fn next_link(resp: &k7s_deps::reqwest::Response) -> Option<String> {
+    let header = resp
+        .headers()
+        .get("link")
+        .and_then(|v| v.to_str().ok())?
+        .to_string();
+    next_link_value(&header)
+}
+
+/// Pure parser half of [`next_link`], split out for unit testing.
+fn next_link_value(header: &str) -> Option<String> {
+    for part in header.split(',') {
+        let part = part.trim();
+        let Some(target) = part
+            .strip_prefix('<')
+            .and_then(|rest| rest.split('>').next())
+        else {
+            continue;
+        };
+        // Accept both `rel="next"` (spec-canonical) and `rel=next`. The
+        // parameters live after the closing `>` of the target.
+        let params = part.split_once('>').map(|(_, p)| p).unwrap_or("");
+        if params.contains("rel=\"next\"") || params.contains("rel=next") {
+            return Some(target.to_string());
+        }
+    }
+    None
+}
+
+/// Resolve a `Link` target against the registry base URL. Registries return
+/// either an absolute URL or the common path-with-query form
+/// (`/v2/_catalog?last=foo&n=100`).
+fn resolve_next(base_url: &str, next: &str) -> String {
+    if next.starts_with("http://") || next.starts_with("https://") {
+        next.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            base_url.trim_end_matches('/'),
+            next.trim_start_matches('/')
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -524,6 +593,16 @@ pub async fn manifest(reg: &ImageRegistry, repo: &str, tag: &str) -> AppResult<I
     if !status.is_success() {
         return Err(AppError::Other(format!("manifest: HTTP {status}")));
     }
+    // The registry reports the manifest's own digest in the
+    // `Docker-Content-Digest` response header — read it before `text()`
+    // consumes the response. Computing it client-side would mean hashing the
+    // exact wire bytes (any re-serialisation breaks it), and the previous
+    // use of the *config* digest was simply the wrong object.
+    let header_digest = resp
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let text = resp
         .text()
         .await
@@ -571,7 +650,10 @@ pub async fn manifest(reg: &ImageRegistry, repo: &str, tag: &str) -> AppResult<I
         })
         .unwrap_or_default();
     let size = config_size + layers.iter().map(|l| l.size).sum::<i64>();
-    let digest = config_digest.clone();
+    // Fall back to the config digest when the registry omits the header
+    // (schema-1 manifests and a few proxies do) — same value the old code
+    // always reported.
+    let digest = header_digest.unwrap_or_else(|| config_digest.clone());
     Ok(ImageManifest {
         schema_version,
         media_type,
@@ -714,5 +796,46 @@ mod tests {
     #[test]
     fn urlencode_passes_through_safe_chars() {
         assert_eq!(urlencode("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn next_link_value_finds_rel_next() {
+        // The distribution-style header: relative URL, quoted rel.
+        assert_eq!(
+            next_link_value(r#"</v2/_catalog?last=foo&n=100>; rel="next""#),
+            Some("/v2/_catalog?last=foo&n=100".into())
+        );
+        // Absolute URL, unquoted rel.
+        assert_eq!(
+            next_link_value(r#"<https://reg.io/v2/x/tags/list?last=a>; rel=next"#),
+            Some("https://reg.io/v2/x/tags/list?last=a".into())
+        );
+    }
+
+    #[test]
+    fn next_link_value_ignores_other_relations() {
+        assert_eq!(next_link_value(r#"</v2/_catalog>; rel="first""#), None);
+        // Multiple relations: only the `next` one is picked.
+        assert_eq!(
+            next_link_value(
+                r#"</v2/_catalog?cursor=1>; rel="first", </v2/_catalog?cursor=2>; rel="next""#
+            ),
+            Some("/v2/_catalog?cursor=2".into())
+        );
+        assert_eq!(next_link_value(""), None);
+    }
+
+    #[test]
+    fn resolve_next_joins_relative_targets() {
+        // Path+query form (distribution): joined onto the registry base.
+        assert_eq!(
+            resolve_next("https://reg.local", "/v2/_catalog?last=foo"),
+            "https://reg.local/v2/_catalog?last=foo"
+        );
+        // Absolute URLs pass through untouched.
+        assert_eq!(
+            resolve_next("https://reg.local", "https://other.io/v2/_catalog?n=1"),
+            "https://other.io/v2/_catalog?n=1"
+        );
     }
 }

@@ -37,10 +37,11 @@ impl CommandRegistry {
     /// multi-word fields — the frontend sends camelCase keys on the wire
     /// (Tauri's convention).
     ///
-    /// Panics on a duplicate `name`. Registration happens once at startup,
-    /// so a duplicate means one of two call sites is wrong — failing fast
-    /// there beats the old silent-shadow behaviour, which is how a renamed
-    /// command once left 27 commands unreachable on the web shell.
+    /// A duplicate `name` is logged loudly and the later registration wins
+    /// (plain insert semantics). A duplicate means one of the two call sites
+    /// is wrong — but panicking here took the whole shell down at startup,
+    /// which is worse than one shadowed command: the error log keeps the
+    /// conflict visible without breaking boot.
     pub fn register<A, R, F, Fut>(&mut self, name: &'static str, handler: F)
     where
         A: DeserializeOwned + Send + 'static,
@@ -49,9 +50,9 @@ impl CommandRegistry {
         Fut: Future<Output = AppResult<R>> + Send + 'static,
     {
         if self.handlers.contains_key(name) {
-            panic!(
-                "CommandRegistry: duplicate registration for `{name}` — the second \
-                 handler would silently shadow the first. Remove one of the \
+            k7s_deps::tracing::error!(
+                "CommandRegistry: duplicate registration for `{name}` — the \
+                 second handler shadows the first. Remove one of the \
                  `register(\"{name}\")` call sites."
             );
         }
@@ -161,19 +162,25 @@ mod tests {
         assert!(err.to_string().contains("bad arguments"));
     }
 
-    /// A duplicate name must fail loudly at startup, not silently shadow —
-    /// silent shadowing is how commands go missing on one transport while
-    /// still working on the other.
+    /// A duplicate name must not take the shell down at startup: the second
+    /// registration replaces the first (insert semantics) after logging an
+    /// error, so the conflict stays visible without breaking boot.
     #[test]
-    #[should_panic(expected = "duplicate registration")]
-    fn duplicate_registration_panics() {
+    fn duplicate_registration_logs_and_shadows() {
         let mut r = CommandRegistry::default();
         r.register("dup", |state, a: k7s_deps::serde_json::Value| async move {
             echo(state, a.as_u64().unwrap_or(0) as usize).await
         });
         r.register("dup", |state, a: k7s_deps::serde_json::Value| async move {
-            echo(state, a.as_u64().unwrap_or(0) as usize).await
+            // Second handler: different observable result (x100) so the
+            // test can prove which registration is live.
+            echo(state, (a.as_u64().unwrap_or(0) * 100) as usize).await
         });
+        let handler = r.get("dup").expect("dup still registered");
+        let out =
+            block_on(handler(test_state(), k7s_deps::serde_json::json!(1))).expect("dispatch ok");
+        // The later registration won.
+        assert_eq!(out, k7s_deps::serde_json::json!(200));
     }
 
     /// Minimal block_on for tests.

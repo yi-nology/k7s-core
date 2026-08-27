@@ -58,8 +58,10 @@ pub async fn list_dir(
     let cmd = vec![
         "/bin/sh".into(),
         "-c".into(),
+        // `--` ends option parsing so a file literally named "-l" (or a
+        // path starting with a dash) is listed, not interpreted as a flag.
         format!(
-            "ls -la --time-style=+%s --color=never {} 2>/dev/null",
+            "ls -la --time-style=+%s --color=never -- {} 2>/dev/null",
             quote_arg(&safe)
         ),
     ];
@@ -101,14 +103,26 @@ pub async fn write_file(
     let cmd = vec![
         "/bin/sh".into(),
         "-c".into(),
+        // Quote the command substitution: a directory whose name contains
+        // spaces or glob characters would otherwise word-split and make
+        // mkdir create several wrong directories.
         format!(
-            "mkdir -p -- $(dirname -- {}) && tee -- {} >/dev/null",
+            "mkdir -p -- \"$(dirname -- {})\" && tee -- {} >/dev/null",
             quote_arg(&safe),
             quote_arg(&safe)
         ),
     ];
     // `tee` reads from stdin; we use the streaming exec helper.
     run_pipe(&client, namespace, pod, container, &cmd, content.as_bytes()).await?;
+    // Audit identifiers only — never the file contents.
+    crate::core::audit::record(
+        "podfile.write",
+        k7s_deps::serde_json::json!({
+            "namespace": namespace,
+            "pod": pod,
+            "path": path,
+        }),
+    );
     Ok(())
 }
 
@@ -152,6 +166,15 @@ pub async fn upload_path(
         ),
     ];
     run_pipe(&client, namespace, pod, container, &cmd, tar_bytes).await?;
+    // Audit identifiers only — never the archive bytes.
+    crate::core::audit::record(
+        "podfile.upload",
+        k7s_deps::serde_json::json!({
+            "namespace": namespace,
+            "pod": pod,
+            "path": dest_dir,
+        }),
+    );
     Ok(())
 }
 

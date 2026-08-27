@@ -333,13 +333,26 @@ pub async fn undo_to(
     name: &str,
     to_revision: Option<i64>,
 ) -> AppResult<()> {
-    match kind {
+    let result = match kind {
         "deployments" => undo_deployment(client, namespace, name, to_revision).await,
         "statefulsets" | "daemonsets" => {
             undo_controller_revision(client, kind, namespace, name, to_revision).await
         }
         _ => Err(AppError::Other(format!("{kind} cannot be rolled back"))),
+    };
+    if result.is_ok() {
+        // Audit identifiers only, after the rollback actually landed.
+        crate::core::audit::record(
+            "rollout.undo",
+            k7s_deps::serde_json::json!({
+                "kind": kind,
+                "namespace": namespace,
+                "name": name,
+                "revision": to_revision,
+            }),
+        );
     }
+    result
 }
 
 async fn undo_deployment(

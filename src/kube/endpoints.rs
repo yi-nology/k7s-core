@@ -77,15 +77,20 @@ fn map_slice(s: &EndpointSlice) -> EndpointRow {
     let mut ready = 0i64;
     let mut addresses = Vec::new();
     for endpoint in s.endpoints.iter().flatten() {
-        if endpoint
+        // Per the EndpointSlice API a nil `ready` must be read as true — only
+        // an explicit false means "not serving" (same reading as
+        // ingress_debug::count_ready_addresses). Counting per address (not
+        // per endpoint) keeps `ready` on the same scale as `total` below
+        // when an endpoint lists several addresses.
+        let is_ready = endpoint
             .conditions
             .as_ref()
             .and_then(|c| c.ready)
-            .unwrap_or(false)
-        {
-            ready += 1;
-        }
+            .unwrap_or(true);
         for addr in &endpoint.addresses {
+            if is_ready {
+                ready += 1;
+            }
             addresses.push(match slice_port {
                 Some(p) => format!("{addr}:{p}"),
                 None => addr.clone(),
@@ -138,11 +143,12 @@ pub async fn addresses_for(
     let slice = api.get(name).await?;
     let mut out = Vec::new();
     for endpoint in slice.endpoints.as_deref().unwrap_or_default() {
+        // nil ready = true, matching map_slice above and the API semantics.
         let ready = endpoint
             .conditions
             .as_ref()
             .and_then(|c| c.ready)
-            .unwrap_or(false);
+            .unwrap_or(true);
         let (kind, target) = endpoint
             .target_ref
             .as_ref()
@@ -249,6 +255,23 @@ mod tests {
         assert_eq!(row.ready, 0);
         assert_eq!(row.total, 0);
         assert!(row.addresses.is_empty());
+    }
+
+    /// Per the EndpointSlice API, `ready: nil` means ready — only an explicit
+    /// false is "not serving".
+    #[test]
+    fn map_slice_treats_nil_ready_as_true() {
+        let mut s = make_slice("nil-ready", "default", "svc", 1, 2);
+        if let Some(eps) = s.endpoints.as_mut() {
+            eps[1].conditions = Some(EndpointConditions {
+                ready: None,
+                ..Default::default()
+            });
+        }
+        let row = map_slice(&s);
+        // One explicit true + one nil → both ready, counted per address.
+        assert_eq!(row.ready, 2);
+        assert_eq!(row.total, 2);
     }
 
     #[test]

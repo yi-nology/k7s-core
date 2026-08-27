@@ -264,6 +264,16 @@ pub async fn list_node_images(
         // The debug pod spec pins its single container to "debug"; passing the
         // pod name here made the exec attach to a non-existent container.
         ap = ap.container("debug");
+        // One-shot privileged host exec — audit namespace/pod + the command
+        // argv (identifiers only, no command output).
+        crate::core::audit::record(
+            "exec.run",
+            k7s_deps::serde_json::json!({
+                "namespace": nodeshell::DEBUG_NAMESPACE,
+                "pod": &pod_name,
+                "command": argv,
+            }),
+        );
         let mut proc = pod_api.exec(&pod_name, argv, &ap).await?;
         let mut out = Vec::new();
         if let Some(mut stdout) = proc.stdout() {
@@ -348,6 +358,16 @@ pub async fn export_from_node(
         // The debug pod spec pins its single container to "debug"; passing the
         // pod name here made the exec attach to a non-existent container.
         ap = ap.container("debug");
+        // One-shot privileged host exec — audit namespace/pod + the command
+        // argv (identifiers only, no command output).
+        crate::core::audit::record(
+            "exec.run",
+            k7s_deps::serde_json::json!({
+                "namespace": nodeshell::DEBUG_NAMESPACE,
+                "pod": &pod_name,
+                "command": argv,
+            }),
+        );
         let mut proc = pod_api.exec(&pod_name, argv, &ap).await?;
 
         // Stream stdout to the local file.

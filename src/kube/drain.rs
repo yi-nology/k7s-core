@@ -88,6 +88,15 @@ pub async fn run_drain(client: Client, sink: EventSink, node: String) {
 
     let targets: Vec<Pod> = list.items.into_iter().filter(is_evictable).collect();
     let total = targets.len();
+    // Audit the dangerous operation up front with identifiers only — a drain
+    // both cordons the node and evicts every eligible pod on it.
+    crate::core::audit::record(
+        "node.drain",
+        k7s_deps::serde_json::json!({
+            "node": &node,
+            "pods": total,
+        }),
+    );
     let mut progress = DrainProgress {
         node: node.clone(),
         evicted: 0,

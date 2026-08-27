@@ -23,13 +23,26 @@ pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
         .map(|m| {
-            let content = match m {
-                Message::System { content } => content.as_str(),
-                Message::User { content } => content.as_str(),
-                Message::Assistant { content, .. } => content.as_deref().unwrap_or(""),
-                Message::Tool { content, .. } => content.as_str(),
+            let (content, tool_args) = match m {
+                Message::System { content } => (content.as_str(), 0),
+                Message::User { content } => (content.as_str(), 0),
+                Message::Assistant {
+                    content,
+                    tool_calls,
+                    ..
+                } => {
+                    // tool_calls.arguments are JSON sent verbatim to the
+                    // provider; skipping them under-counted agentic turns by
+                    // a lot (each call can carry a full manifest).
+                    let args: usize = tool_calls
+                        .as_ref()
+                        .map(|c| c.iter().map(|t| estimate_tokens(&t.arguments)).sum())
+                        .unwrap_or(0);
+                    (content.as_deref().unwrap_or(""), args)
+                }
+                Message::Tool { content, .. } => (content.as_str(), 0),
             };
-            estimate_tokens(content) + 4 // per-message overhead
+            estimate_tokens(content) + tool_args + 4 // per-message overhead
         })
         .sum()
 }
@@ -97,37 +110,69 @@ pub fn compress_messages(messages: &[Message], budget: usize) -> Vec<Message> {
     result
 }
 
-/// Drop tool call/result message pairs from before the recent window.
+/// Shrink old tool results while preserving the tool_call ↔ result pairing.
+///
+/// OpenAI-compatible APIs reject (400) any history where an Assistant
+/// `tool_calls` entry has no matching `Tool` message. The old implementation
+/// dropped Tool messages after the first of each block while KEEPING the
+/// Assistant message — on a multi-tool turn (the norm for this agent) it
+/// produced exactly that dangling-tool_call history, and since typical
+/// sessions have ≤ KEEP_RECENT_TURNS user messages, `compress_messages` hit
+/// this path on every compression.
+///
+/// Instead of removing messages, replace each bulky old result's payload
+/// with a stub. The `Tool` message stays (same `tool_call_id`), the provider
+/// stays happy, and the bulk — tool results are by far the largest payloads
+/// — still shrinks.
 fn drop_old_tool_results(messages: &[Message], start: usize) -> Vec<Message> {
-    let mut result = Vec::new();
-    let mut in_tool_block = false;
+    const STUB: &str = "[older tool result omitted]";
+    const KEEP_RESULT_TOKENS: usize = 80;
 
-    for (i, msg) in messages.iter().enumerate() {
-        if i < start {
-            result.push(msg.clone());
-            continue;
-        }
-        match msg {
-            Message::Tool { .. } => {
-                if in_tool_block {
-                    continue; // drop duplicate tool results
-                }
-                result.push(msg.clone());
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i < start {
+                return m.clone();
             }
+            match m {
+                Message::Tool {
+                    tool_call_id,
+                    content,
+                } if estimate_tokens(content) > KEEP_RESULT_TOKENS => Message::Tool {
+                    tool_call_id: tool_call_id.clone(),
+                    content: STUB.to_string(),
+                },
+                _ => m.clone(),
+            }
+        })
+        .collect()
+}
+
+/// True when every Assistant `tool_calls` id has a matching `Tool` message
+/// and vice versa — the pairing invariant providers enforce. Used by tests.
+#[cfg(test)]
+pub(crate) fn tool_pairs_are_balanced(messages: &[Message]) -> bool {
+    use std::collections::HashSet;
+    let mut called: HashSet<String> = HashSet::new();
+    let mut answered: HashSet<String> = HashSet::new();
+    for m in messages {
+        match m {
             Message::Assistant {
-                tool_calls: Some(_),
+                tool_calls: Some(calls),
                 ..
             } => {
-                in_tool_block = true;
-                result.push(msg.clone());
+                for c in calls {
+                    called.insert(c.id.clone());
+                }
             }
-            _ => {
-                in_tool_block = false;
-                result.push(msg.clone());
+            Message::Tool { tool_call_id, .. } => {
+                answered.insert(tool_call_id.clone());
             }
+            _ => {}
         }
     }
-    result
+    called == answered
 }
 
 /// Create a brief summary of old conversation turns.
@@ -304,8 +349,10 @@ mod tests {
             content: "System".into(),
         }];
 
-        // Add turns with tool calls
-        for i in 0..8 {
+        // Add turns with tool calls. ≤ KEEP_RECENT_TURNS user turns so
+        // compression takes the stub path (drop_old_tool_results) rather
+        // than the summarize-old-turns path.
+        for i in 0..3 {
             messages.push(Message::User {
                 content: format!("Q{i}"),
             });
@@ -319,18 +366,94 @@ mod tests {
             });
             messages.push(Message::Tool {
                 tool_call_id: format!("call_{i}"),
-                content: format!("{{\"pods\": {}}}", "[]".repeat(100)),
+                // ~2000 chars ≈ 500 tokens — must exceed KEEP_RESULT_TOKENS
+                // (80) for the stubbing path to engage; a short fixture
+                // stubs nothing and the assertion at the bottom fails.
+                content: format!("{{\"pods\": {}}}", "[]".repeat(1000)),
             });
         }
 
-        let original_len = messages.len();
         let result = compress_messages(&messages, 500);
 
-        // Should be significantly shorter due to dropped tool results
+        // Compression now shrinks the tool-result PAYLOADS, not the message
+        // count — removing Tool messages (the old behaviour) left dangling
+        // tool_calls and a provider 400.
         assert!(
-            result.len() < original_len,
-            "Expected compression to reduce message count"
+            estimate_messages_tokens(&result) < estimate_messages_tokens(&messages),
+            "Expected compression to reduce estimated tokens"
         );
+        assert!(
+            tool_pairs_are_balanced(&result),
+            "compression must never leave a dangling tool_call id"
+        );
+        let stubbed = result.iter().filter(|m| matches!(m, Message::Tool { content, .. } if *content == "[older tool result omitted]")).count();
+        assert!(stubbed > 0, "expected some old tool results to be stubbed");
+    }
+
+    /// A multi-tool turn (one Assistant with N tool_calls + N Tool results)
+    /// must survive compression with every id still answered — this is the
+    /// exact shape the old implementation corrupted.
+    #[test]
+    fn compression_preserves_multi_tool_pairing() {
+        let calls: Vec<crate::ai::llm::OutgoingToolCall> = (0..3)
+            .map(|i| crate::ai::llm::OutgoingToolCall {
+                id: format!("call_{i}"),
+                name: "list_pods".into(),
+                arguments: "{}".into(),
+            })
+            .collect();
+        let mut messages = vec![
+            Message::System {
+                content: "System".into(),
+            },
+            Message::User {
+                content: "check all three namespaces".into(),
+            },
+            Message::Assistant {
+                content: None,
+                tool_calls: Some(calls),
+            },
+        ];
+        for i in 0..3 {
+            messages.push(Message::Tool {
+                tool_call_id: format!("call_{i}"),
+                content: "x".repeat(2000),
+            });
+        }
+
+        let result = compress_messages(&messages, 500);
+        assert!(tool_pairs_are_balanced(&result));
+        // All three ids still present.
+        for i in 0..3 {
+            let id = format!("call_{i}");
+            assert!(
+                result.iter().any(
+                    |m| matches!(m, Message::Tool { tool_call_id, .. } if *tool_call_id == id)
+                ),
+                "missing Tool answer for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_counts_tool_call_arguments() {
+        let thin = Message::Assistant {
+            content: None,
+            tool_calls: Some(vec![crate::ai::llm::OutgoingToolCall {
+                id: "c1".into(),
+                name: "apply".into(),
+                arguments: "{}".into(),
+            }]),
+        };
+        let fat = Message::Assistant {
+            content: None,
+            tool_calls: Some(vec![crate::ai::llm::OutgoingToolCall {
+                id: "c1".into(),
+                name: "apply".into(),
+                arguments: "a".repeat(400), // ~100 tokens
+            }]),
+        };
+        assert!(estimate_messages_tokens(&[fat]) > estimate_messages_tokens(&[thin]) + 50);
     }
 
     #[test]

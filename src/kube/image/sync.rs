@@ -35,6 +35,11 @@ pub const IMAGE_SYNC_LOG_EVENT: &str = "image-sync-log";
 /// Tauri event name signalling the end of an image sync (with success/failure).
 pub const IMAGE_SYNC_DONE_EVENT: &str = "image-sync-done";
 
+/// Wall-clock budget for one `skopeo copy`. Multi-GB images over slow links
+/// legitimately take tens of minutes, but a registry that stalls mid-copy
+/// must not pin the task (and its temp auth file) forever.
+const COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// The result of a completed `skopeo copy`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,23 +267,35 @@ fn unique_authfile_path(prefix: &str) -> AppResult<std::path::PathBuf> {
 /// (archives, oci layouts, dirs) there is no registry host to authenticate
 /// against, so this returns `None`.
 ///
-/// `docker://nginx:1.25`           → `nginx` (Docker Hub shorthand)
-/// `docker://registry-a/foo:v1`    → `registry-a`
+/// Docker reference normalisation applies before the host is taken: a first
+/// path segment is only a registry when it contains a `.`/`:`, or is
+/// `localhost` — otherwise it is a repository (namespace) on Docker Hub, whose
+/// authfile key is `docker.io`. Returning the raw first segment here (e.g.
+/// `nginx:1.25`) produced an authfile key no registry would ever match.
+///
+/// `docker://nginx:1.25`           → `docker.io` (Hub shorthand)
+/// `docker://library/nginx:1.25`   → `docker.io` (namespace, not a host)
+/// `docker://registry.local/foo:v1`→ `registry.local`
 /// `docker://host:5000/lib/x:tag`  → `host:5000`
 /// `docker-archive:/tmp/x.tar`     → `None`
 pub(crate) fn docker_transport_host(reference: &str) -> Option<&str> {
     let rest = reference.strip_prefix("docker://")?;
-    // The host is everything up to the first `/`. A bare `nginx:1.25` has no
-    // slash, so the whole thing (minus the `:tag`) is the host/path — but for
-    // auth purposes the first `/`-delimited segment that contains a `.` or `:`
-    // is the host. To keep this robust we just take the first segment; skopeo
-    // matches auth by the registry the image resolves to.
     let host_end = rest.find('/').unwrap_or(rest.len());
-    let host = &rest[..host_end];
-    if host.is_empty() {
-        None
+    let first = &rest[..host_end];
+    if first.is_empty() {
+        return None;
+    }
+    // A bare `name:tag` has no path at all — the whole segment is the image
+    // name (its `:` separates the tag), so it can never be a host.
+    if host_end == rest.len() {
+        return Some("docker.io");
+    }
+    let is_host =
+        first.contains('.') || first.contains(':') || first.eq_ignore_ascii_case("localhost");
+    if is_host {
+        Some(first)
     } else {
-        Some(host)
+        Some("docker.io")
     }
 }
 
@@ -433,10 +450,20 @@ pub async fn copy_image(
         }
     });
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| AppError::Other(format!("wait skopeo: {e}")))?;
+    let status = match k7s_deps::tokio::time::timeout(COPY_TIMEOUT, child.wait()).await {
+        Ok(res) => res.map_err(|e| AppError::Other(format!("wait skopeo: {e}")))?,
+        Err(_) => {
+            // Timed out: kill skopeo so it stops pushing layers, then let the
+            // pipe EOFs finish the pump tasks above before we bail out.
+            let _ = child.kill().await;
+            let _ = k7s_deps::tokio::join!(out_task, err_task);
+            return Err(AppError::Other(format!(
+                "skopeo copy timed out after {}s (source {source}) — \
+                 retry, or raise COPY_TIMEOUT for exceptionally large images",
+                COPY_TIMEOUT.as_secs()
+            )));
+        }
+    };
     // Drain both pumps before we read the count / build the summary.
     let _ = k7s_deps::tokio::join!(out_task, err_task);
 
@@ -500,10 +527,12 @@ pub fn build_export_argv(
         "copy".into(),
         "--retry-times".into(),
         "3".into(),
+        // Cluster nodes are linux regardless of the host OS (typically
+        // darwin/arm64 for a laptop). The architecture is deliberately NOT
+        // overridden: skopeo then copies per the source manifest(list), so an
+        // arm64 cluster gets the arm64 variant instead of a hard-coded amd64.
         "--override-os".into(),
         "linux".into(),
-        "--override-arch".into(),
-        "amd64".into(),
     ];
     if let Some(path) = src_authfile {
         argv.push("--src-authfile".into());
@@ -622,10 +651,17 @@ pub async fn export_from_registry(
         }
     });
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| AppError::Other(format!("wait skopeo: {e}")))?;
+    let status = match k7s_deps::tokio::time::timeout(COPY_TIMEOUT, child.wait()).await {
+        Ok(res) => res.map_err(|e| AppError::Other(format!("wait skopeo: {e}")))?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = k7s_deps::tokio::join!(out_task, err_task);
+            return Err(AppError::Other(format!(
+                "skopeo export timed out after {}s (source {source_ref})",
+                COPY_TIMEOUT.as_secs()
+            )));
+        }
+    };
     let _ = k7s_deps::tokio::join!(out_task, err_task);
 
     let success = status.success();
@@ -677,13 +713,12 @@ fn build_argv(
         // abort a 2 GB image push). skopeo's default is 0 retries.
         "--retry-times".into(),
         "3".into(),
-        // Always target linux/amd64 unless the source is arch-specific. Without
-        // this, skopeo on a macOS/arm64 host would select the arm64 variant of
-        // a multi-arch image — almost never what a linux cluster wants.
+        // Always target linux — a K8s node never runs darwin — but leave the
+        // architecture to skopeo: with no --override-arch it copies from the
+        // source manifest list, so arm64 clusters receive the arm64 variant
+        // (a hard-coded amd64 silently broke them).
         "--override-os".into(),
         "linux".into(),
-        "--override-arch".into(),
-        "amd64".into(),
     ];
 
     if let Some(path) = src_authfile {
@@ -814,9 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn build_argv_forces_linux_amd64() {
-        // Regression guard: the override flags must always be present so a
-        // macOS host doesn't silently copy a darwin/arm64 image.
+    fn build_argv_forces_linux_os() {
+        // Regression guard: linux must always be forced so a macOS host
+        // doesn't copy a darwin image, while the architecture is left to the
+        // source manifest (no --override-arch).
         let argv = build_argv(
             "skopeo",
             "docker://nginx:1",
@@ -828,8 +864,7 @@ mod tests {
         );
         assert!(argv.contains(&"--override-os".into()));
         assert!(argv.contains(&"linux".into()));
-        assert!(argv.contains(&"--override-arch".into()));
-        assert!(argv.contains(&"amd64".into()));
+        assert!(!argv.iter().any(|a| a == "--override-arch"));
     }
 
     #[test]
@@ -895,9 +930,9 @@ mod tests {
     }
 
     #[test]
-    fn build_export_argv_forces_linux_amd64() {
-        // Regression guard: the override flags must always be present so a
-        // macOS host doesn't silently export a darwin/arm64 image.
+    fn build_export_argv_forces_linux_os() {
+        // Regression guard: linux must be forced, arch must not be (see
+        // build_argv_forces_linux_os).
         let argv = build_export_argv(
             "skopeo",
             "docker://nginx:1",
@@ -907,23 +942,39 @@ mod tests {
         );
         assert!(argv.contains(&"--override-os".into()));
         assert!(argv.contains(&"linux".into()));
-        assert!(argv.contains(&"--override-arch".into()));
-        assert!(argv.contains(&"amd64".into()));
+        assert!(!argv.iter().any(|a| a == "--override-arch"));
     }
 
     #[test]
     fn docker_transport_host_extracts_registry() {
+        // Hub shorthands normalise to docker.io — the key Docker/skopeo
+        // authfiles actually use for the Hub.
         assert_eq!(
             docker_transport_host("docker://nginx:1.25"),
-            Some("nginx:1.25")
+            Some("docker.io")
         );
         assert_eq!(
+            docker_transport_host("docker://library/nginx:1.25"),
+            Some("docker.io")
+        );
+        // A first segment without `.`/`:` (and not localhost) is a Hub
+        // namespace, not a registry host.
+        assert_eq!(
             docker_transport_host("docker://registry-a/foo:v1"),
-            Some("registry-a")
+            Some("docker.io")
+        );
+        // Real hosts (dotted, ported, or localhost) pass through.
+        assert_eq!(
+            docker_transport_host("docker://registry.local/foo:v1"),
+            Some("registry.local")
         );
         assert_eq!(
             docker_transport_host("docker://host:5000/lib/x:tag"),
             Some("host:5000")
+        );
+        assert_eq!(
+            docker_transport_host("docker://localhost/foo"),
+            Some("localhost")
         );
         // Non-docker transports have no registry host to authenticate against.
         assert_eq!(docker_transport_host("docker-archive:/tmp/x.tar"), None);

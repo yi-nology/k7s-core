@@ -56,17 +56,7 @@ struct AlertManagerMeta {
 }
 
 fn config_path() -> AppResult<PathBuf> {
-    let dir = match std::env::var_os("HOME") {
-        Some(h) => std::path::PathBuf::from(h).join(if cfg!(target_os = "macos") {
-            "Library/Application Support/k7s"
-        } else {
-            ".config/k7s"
-        }),
-        None => return Err(AppError::Other("no HOME".into())),
-    };
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::Other(format!("mkdir {}: {e}", dir.display())))?;
-    Ok(dir.join("alertmanagers.json"))
+    Ok(crate::kube::user_config_dir()?.join("alertmanagers.json"))
 }
 
 fn load_file() -> AppResult<AlertManagerFile> {

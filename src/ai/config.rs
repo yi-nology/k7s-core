@@ -54,6 +54,11 @@ pub struct AiConfig {
     /// Hard cap on agent loop turns. Prevents a runaway LLM from burning tokens.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    /// Sandbox security settings (denied namespaces, policy rules, rate
+    /// limits). Persisted here so the config file is the single place a user
+    /// edits; `SandboxConfig::default()` is fail-secure.
+    #[serde(default)]
+    pub sandbox: crate::ai::sandbox::SandboxConfig,
 }
 
 fn default_max_turns() -> u32 {
@@ -67,6 +72,7 @@ impl Default for AiConfig {
             provider: LlmProviderConfig::default(),
             permission: PermissionMode::default(),
             max_turns: default_max_turns(),
+            sandbox: crate::ai::sandbox::SandboxConfig::default(),
         }
     }
 }

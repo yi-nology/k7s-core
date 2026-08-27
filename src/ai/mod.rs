@@ -7,13 +7,15 @@
 //!
 //! # Architecture (one-paragraph tour)
 //!
-//! [`config`] loads the user's `AiConfig` (provider/permission/toggle) from
-//! `ai-config.json`; the `api_key` is stored separately, obfuscated, in
+//! [`config`] loads the user's `AiConfig` (provider/permission/sandbox/toggle)
+//! from `ai-config.json`; the `api_key` is stored separately, obfuscated, in
 //! [`secret`]. [`llm::OpenAiClient`] is the OpenAI-compatible streaming client
 //! (covers DeepSeek/Kimi/Zhipu/OpenAI/Ollama). [`tools`] is an *independent*
 //! tool set — a `Tool` trait + `ToolRegistry`, ~12 tools in read/write/diag
 //! groups — designed for LLM function-calling (Plan C). Under the hood every
-//! tool reuses [`crate::mcp::kube_api`]'s free functions, so there's no second
+//! tool reuses [`crate::core::shell_common`]'s free functions plus raw `kube`
+//! calls (it deliberately avoids the feature-gated `crate::mcp::kube_api`, so
+//! the AI module ships in the plain desktop build), so there's no second
 //! cluster-access layer (Plan A reuse). [`permission`] is the hard gate write
 //! tools pass through. [`agent::AgentLoop`] is the ReAct cycle: LLM → tool
 //! calls → permission gate → execute → loop, streaming events to the caller
@@ -90,12 +92,106 @@ pub fn atomic_write_json<T: serde::Serialize + ?Sized>(
     std::fs::rename(&tmp, path)
 }
 
-/// Read a JSON file and deserialize it, returning `T::default()` if the file
-/// is missing, empty, or contains invalid JSON.
+/// Read a JSON file and deserialize it, returning `T::default()` when it's
+/// missing or empty.
+///
+/// Corrupt JSON is treated differently from "never persisted": the broken
+/// bytes are renamed to `<path>.corrupt` (so the next save doesn't silently
+/// destroy them and the user can recover) and an error is logged, then
+/// defaults are returned — one bad file must not take the whole module down.
 pub fn atomic_read_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
-    std::fs::read_to_string(path)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|s| k7s_deps::serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) => {
+            // Unreadable for another reason (permissions, …): warn and fall
+            // back like before rather than crash every caller.
+            k7s_deps::tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "cannot read JSON file; using defaults"
+            );
+            return T::default();
+        }
+    };
+    if text.trim().is_empty() {
+        return T::default();
+    }
+    match k7s_deps::serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            let mut backup = path.as_os_str().to_os_string();
+            backup.push(".corrupt");
+            if let Err(rename_err) = std::fs::rename(path, &backup) {
+                k7s_deps::tracing::warn!(
+                    path = %path.display(),
+                    error = %rename_err,
+                    "could not back up corrupt JSON file"
+                );
+            }
+            k7s_deps::tracing::error!(
+                path = %path.display(),
+                error = %e,
+                "corrupt JSON file; backed up and reset to defaults"
+            );
+            T::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_file(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "k7s-ai-test-mod-{tag}-{}",
+            k7s_deps::uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("state.json")
+    }
+
+    /// Missing file → defaults, quietly (nothing was ever persisted).
+    #[test]
+    fn missing_file_returns_default() {
+        let path = temp_file("missing");
+        let v: k7s_deps::serde_json::Value = atomic_read_json(&path);
+        assert!(v.is_null());
+    }
+
+    /// Corrupt JSON → defaults, and the broken bytes are kept as `.corrupt`
+    /// instead of being overwritten by the next save.
+    #[test]
+    fn corrupt_file_backed_up_and_reset() {
+        let path = temp_file("corrupt");
+        std::fs::write(&path, "{ not valid json !!!").unwrap();
+        let v: k7s_deps::serde_json::Value = atomic_read_json(&path);
+        assert!(v.is_null());
+        let backup = path.with_file_name("state.json.corrupt");
+        assert!(backup.exists(), "corrupt bytes must be preserved");
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            "{ not valid json !!!"
+        );
+        assert!(!path.exists(), "original path is freed for a fresh write");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Valid and empty files keep their existing behavior.
+    #[test]
+    fn valid_and_empty_files() {
+        let path = temp_file("valid");
+        std::fs::write(&path, r#"{"ok":true}"#).unwrap();
+        let v: k7s_deps::serde_json::Value = atomic_read_json(&path);
+        assert_eq!(v["ok"], true);
+
+        std::fs::write(&path, "   \n").unwrap();
+        let v: k7s_deps::serde_json::Value = atomic_read_json(&path);
+        assert!(v.is_null());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

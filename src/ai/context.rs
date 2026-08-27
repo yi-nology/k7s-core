@@ -82,6 +82,10 @@ pub async fn selected_resource_context(
             .await
             .map_err(|e| AiError::Tool(e.to_string()))?;
         obj.metadata.managed_fields = None;
+        // A focused Secret is still a Secret: mask its payload before the
+        // object is injected into the prompt (same choke point as the
+        // describe/get-yaml tools).
+        crate::ai::tools::impls::redact_secret_data(&mut obj, kind);
         k7s_deps::serde_json::to_value(&obj).map_err(|e| AiError::Tool(e.to_string()))
     }
     .await;

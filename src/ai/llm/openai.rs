@@ -217,8 +217,10 @@ impl crate::ai::llm::LlmClient for OpenAiClient {
         let api_key = self.api_key.clone();
         let temperature = self.temperature;
         // Build the request body now (needs borrowed messages/tools), then
-        // serialise to an owned Value so the borrow ends here.
-        let body = k7s_deps::serde_json::to_value(ChatRequest {
+        // serialise to an owned Value so the borrow ends here. A serialisation
+        // failure must reach the agent loop as an error event, not panic the
+        // runtime — return a one-item error stream instead.
+        let body = match k7s_deps::serde_json::to_value(ChatRequest {
             model: &model,
             messages: to_wire_messages(messages),
             tools: tools
@@ -238,8 +240,13 @@ impl crate::ai::llm::LlmClient for OpenAiClient {
             // default for tool-calling conversations; providers that don't
             // support max_tokens simply ignore the field.
             max_tokens: Some(4096),
-        })
-        .expect("ChatRequest serialises");
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = AiError::LlmParse(format!("request serialisation failed: {e}"));
+                return Box::pin(k7s_deps::futures::stream::iter(vec![Err(err)]));
+            }
+        };
 
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 

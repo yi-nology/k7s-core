@@ -10,7 +10,7 @@
 
 use k7s_deps::tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,6 +43,28 @@ pub struct SessionMessage {
     pub timestamp: String,
 }
 
+/// Process-wide registry of per-data_dir session states.
+///
+/// `SessionManager::new` is cheap and called all over the codebase (every
+/// chat turn constructs one). If each instance kept its own copy of the
+/// sessions, two live instances would load → mutate → full-save separately
+/// and the last save would silently wipe the other's writes. Sharing the
+/// in-memory state per data_dir (first instance loads from disk, everyone
+/// else reuses it) makes every mutation + save globally serialized.
+static SESSION_STATES: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<Vec<Session>>>>>,
+> = std::sync::OnceLock::new();
+
+fn shared_sessions(data_dir: &PathBuf) -> Arc<Mutex<Vec<Session>>> {
+    let registry = SESSION_STATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    // Short critical section on the std Mutex — just the map lookup/insert;
+    // the async lock on the sessions themselves is taken per operation.
+    let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(data_dir.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(load_sessions(data_dir))))
+        .clone()
+}
+
 /// The session manager — owns all sessions and the auto-reply queue.
 pub struct SessionManager {
     data_dir: PathBuf,
@@ -60,10 +82,12 @@ pub struct QueuedMessage {
 
 impl SessionManager {
     pub fn new(data_dir: PathBuf) -> Self {
-        let sessions = load_sessions(&data_dir);
+        // Shares the process-wide state for this data_dir (loaded from disk
+        // only by the first instance — see `SESSION_STATES`).
+        let sessions = shared_sessions(&data_dir);
         Self {
             data_dir,
-            sessions: Arc::new(Mutex::new(sessions)),
+            sessions,
             reply_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
@@ -151,4 +175,74 @@ fn load_sessions(data_dir: &std::path::Path) -> Vec<Session> {
 fn save_sessions(data_dir: &std::path::Path, sessions: &[Session]) {
     let path = data_dir.join("ai-sessions.json");
     let _ = crate::ai::atomic_write_json(&path, sessions);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        // Unique per tag AND per run: the shared registry is process-global,
+        // so a rerun must not observe state left by a previous test process
+        // against the same (now deleted) directory.
+        let dir = std::env::temp_dir().join(format!(
+            "k7s-ai-test-session-{tag}-{}",
+            k7s_deps::uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Two managers over the same data_dir are one logical store: messages
+    /// written through either instance must all survive. Before the shared
+    /// registry, each instance kept its own copy and the last full-file save
+    /// silently wiped the other's writes.
+    #[k7s_deps::tokio::test]
+    async fn concurrent_managers_do_not_lose_updates() {
+        let dir = temp_dir("concurrent");
+        let mgr_a = SessionManager::new(dir.clone());
+        let mgr_b = SessionManager::new(dir.clone());
+
+        let session = mgr_a.create("shared", None).await;
+        let sid = session.id;
+
+        // Alternate writers through the two instances — the exact interleaving
+        // that used to lose writes.
+        for i in 0..20 {
+            let (m, role) = if i % 2 == 0 {
+                (&mgr_a, "user")
+            } else {
+                (&mgr_b, "assistant")
+            };
+            m.add_message(&sid, role, &format!("message {i}")).await;
+        }
+
+        // Both instances (and a fresh third one reading from disk) see all 20.
+        for mgr in [&mgr_a, &mgr_b] {
+            let got = mgr.get(&sid).await.expect("session visible via both");
+            assert_eq!(got.history.len(), 20, "no message may be lost");
+        }
+        let mgr_c = SessionManager::new(dir.clone());
+        let got = mgr_c.get(&sid).await.expect("persisted session readable");
+        assert_eq!(got.history.len(), 20);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session created through one instance is immediately visible through
+    /// another (shared memory, not load-once-per-instance snapshots).
+    #[k7s_deps::tokio::test]
+    async fn create_visible_across_instances() {
+        let dir = temp_dir("visible");
+        let mgr_a = SessionManager::new(dir.clone());
+        let mgr_b = SessionManager::new(dir.clone());
+
+        let s = mgr_a.create("made-by-a", None).await;
+        assert!(mgr_b.get(&s.id).await.is_some());
+        assert!(mgr_b.delete(&s.id).await);
+        assert!(mgr_a.get(&s.id).await.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

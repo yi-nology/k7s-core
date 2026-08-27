@@ -53,6 +53,40 @@ pub use dto::Row;
 pub use kind::*;
 pub use manager::ClientManager;
 
+// ---------------------------------------------------------------------------
+// Per-user directories
+// ---------------------------------------------------------------------------
+
+/// The user's home directory: `$HOME` first, falling back to `$USERPROFILE`
+/// (Windows shells routinely leave `HOME` unset, which used to make every
+/// JSON side-car store fail with "no HOME" there).
+pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+/// Resolve (and create) the per-user k7s config directory shared by the JSON
+/// side-car stores (registries, alertmanagers, grafana, loki, metrics,
+/// saved queries). Replaces six copy-pasted `config_path` helpers: same value
+/// as before — `$HOME/Library/Application Support/k7s` on macOS,
+/// `$HOME/.config/k7s` elsewhere — with `$USERPROFILE` substituting for a
+/// missing `$HOME` so the unix path stays byte-identical for existing data.
+pub(crate) fn user_config_dir() -> crate::error::AppResult<std::path::PathBuf> {
+    use crate::error::AppError;
+    let dir = match home_dir() {
+        Some(h) => h.join(if cfg!(target_os = "macos") {
+            "Library/Application Support/k7s"
+        } else {
+            ".config/k7s"
+        }),
+        None => return Err(AppError::Other("no HOME or USERPROFILE".into())),
+    };
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::Other(format!("mkdir {}: {e}", dir.display())))?;
+    Ok(dir)
+}
+
 /// Payload for [`events::RESOURCE_UPDATE`].
 ///
 /// `kind` is the frontend kind id as a string rather than a [`ResourceKind`]:

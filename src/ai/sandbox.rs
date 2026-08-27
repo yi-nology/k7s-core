@@ -19,8 +19,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxConfig {
-    /// Master switch.
-    #[serde(default)]
+    /// Master switch. Defaults to `true` (fail-secure: a partially-written
+    /// config file must not silently disable the sandbox), matching the
+    /// `Default` impl below.
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Security preset: "off", "loose", "standard", "strict".
     #[serde(default = "default_preset")]
@@ -43,6 +45,10 @@ pub struct SandboxConfig {
     /// Max turns per run.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_preset() -> String {
@@ -132,8 +138,7 @@ pub fn evaluate(
         if matches_pattern(tool_name, &rule.tool_pattern) {
             // Check arg pattern if specified.
             if let Some(ref arg_pat) = rule.arg_pattern {
-                let args_str = k7s_deps::serde_json::to_string(args).unwrap_or_default();
-                if !args_str.contains(arg_pat) {
+                if !arg_pattern_matches(arg_pat, args) {
                     continue; // arg pattern doesn't match, skip this rule
                 }
             }
@@ -177,6 +182,35 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
         return name.ends_with(prefix);
     }
     name == pattern
+}
+
+/// Match a rule's `arg_pattern` against a call's arguments.
+///
+/// Preferred form is `key=value`: an exact comparison against the string form
+/// of `args[key]` (numbers and booleans are compared by their string form, so
+/// `replicas=3` matches `"replicas": 3`). This is what the documented examples
+/// (`namespace=kube-system`, `kind=secrets`) mean, and what the old substring
+/// check failed to honour: `"namespace":"kube-system"` serialized as JSON never
+/// contains the literal `namespace=kube-system`, so those rules silently never
+/// fired. Patterns without `=` (and keys absent from the args) fall back to a
+/// substring check on the serialized arguments, preserving the original loose
+/// behaviour for hand-written patterns.
+fn arg_pattern_matches(pattern: &str, args: &k7s_deps::serde_json::Value) -> bool {
+    if let Some((key, expected)) = pattern.split_once('=') {
+        let (key, expected) = (key.trim(), expected.trim());
+        match args.get(key) {
+            Some(k7s_deps::serde_json::Value::String(s)) => s == expected,
+            // Non-string scalars (numbers, bools) stringify for comparison.
+            Some(other) => other.to_string() == expected,
+            None => k7s_deps::serde_json::to_string(args)
+                .unwrap_or_default()
+                .contains(pattern),
+        }
+    } else {
+        k7s_deps::serde_json::to_string(args)
+            .unwrap_or_default()
+            .contains(pattern)
+    }
 }
 
 /// Preset sandbox configurations.
@@ -232,4 +266,106 @@ pub fn presets() -> Vec<(&'static str, SandboxConfig)> {
             },
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The documented `key=value` patterns must actually fire — the old
+    /// substring check compared `namespace=kube-system` against
+    /// `{"namespace":"kube-system"}` and never matched.
+    #[test]
+    fn arg_pattern_matches_documented_examples() {
+        let args = k7s_deps::serde_json::json!({ "namespace": "kube-system", "kind": "secrets" });
+        assert!(arg_pattern_matches("namespace=kube-system", &args));
+        assert!(arg_pattern_matches("kind=secrets", &args));
+        // Non-matching values must not fire.
+        assert!(!arg_pattern_matches("namespace=default", &args));
+        assert!(!arg_pattern_matches("kind=configmaps", &args));
+    }
+
+    /// Numbers and booleans compare by their string form, so JSON-typed
+    /// arguments match without quoting gymnastics.
+    #[test]
+    fn arg_pattern_matches_scalars_as_strings() {
+        let args = k7s_deps::serde_json::json!({ "replicas": 3, "force": true });
+        assert!(arg_pattern_matches("replicas=3", &args));
+        assert!(!arg_pattern_matches("replicas=5", &args));
+        assert!(arg_pattern_matches("force=true", &args));
+    }
+
+    /// Absent keys and `=`-less patterns keep the original substring fallback
+    /// over the serialized arguments.
+    #[test]
+    fn arg_pattern_substring_fallback() {
+        let args = k7s_deps::serde_json::json!({ "yaml": "namespace: prod\n" });
+        // `=`-less pattern: plain substring against the JSON text.
+        assert!(arg_pattern_matches("prod", &args));
+        assert!(!arg_pattern_matches("staging", &args));
+        // Key absent → also substring, and "namespace=prod" is not a substring
+        // of `{"yaml":"namespace: prod"}` (colon, not equals) — correctly no
+        // match: an absent key can't be equality-checked.
+        assert!(!arg_pattern_matches("namespace=prod", &args));
+    }
+
+    /// End-to-end: a deny rule with `namespace=kube-system` denies the call,
+    /// and an `ask` rule with `kind=secrets` escalates to a user prompt.
+    #[test]
+    fn evaluate_honours_key_value_rules() {
+        let config = SandboxConfig {
+            // Bypass the namespace lists so the rule table is what's under test.
+            denied_namespaces: Vec::new(),
+            rules: vec![
+                CommandRule {
+                    action: "deny".into(),
+                    tool_pattern: "delete_*".into(),
+                    arg_pattern: Some("namespace=kube-system".into()),
+                    reason: "kube-system is protected".into(),
+                },
+                CommandRule {
+                    action: "ask".into(),
+                    tool_pattern: "*".into(),
+                    arg_pattern: Some("kind=secrets".into()),
+                    reason: "secret access needs approval".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let deny = evaluate(
+            &config,
+            "delete_resource",
+            &k7s_deps::serde_json::json!({ "kind": "deployments", "namespace": "kube-system", "name": "coredns" }),
+        );
+        assert!(
+            matches!(deny, SandboxDecision::Deny { ref reason } if reason.contains("kube-system is protected")),
+            "documented deny example must hit, got {deny:?}"
+        );
+
+        let ask = evaluate(
+            &config,
+            "describe_resource",
+            &k7s_deps::serde_json::json!({ "kind": "secrets", "namespace": "default", "name": "db" }),
+        );
+        assert!(
+            matches!(ask, SandboxDecision::Ask { .. }),
+            "documented ask example must hit, got {ask:?}"
+        );
+
+        // A call matching neither rule passes through to Allow.
+        let allow = evaluate(
+            &config,
+            "describe_resource",
+            &k7s_deps::serde_json::json!({ "kind": "pods", "namespace": "default", "name": "web" }),
+        );
+        assert!(matches!(allow, SandboxDecision::Allow));
+    }
+
+    /// A config JSON that omits `enabled` (e.g. hand-edited or older schema)
+    /// must deserialize with the sandbox still on — fail-secure.
+    #[test]
+    fn partial_config_defaults_enabled_true() {
+        let cfg: SandboxConfig = k7s_deps::serde_json::from_str(r#"{"preset":"loose"}"#).unwrap();
+        assert!(cfg.enabled);
+    }
 }

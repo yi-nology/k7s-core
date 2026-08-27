@@ -245,9 +245,13 @@ impl AgentLoop {
         };
 
         // ----------------------------------------------------------------
-        // Load sandbox config.
+        // Load sandbox config (from ai-config.json so the user's rules and
+        // namespace denials actually reach the run; falls back to the
+        // fail-secure defaults when the file can't be read).
         // ----------------------------------------------------------------
-        let sandbox_config = crate::ai::sandbox::SandboxConfig::default();
+        let sandbox_config = crate::ai::config::load(data_dir_ref)
+            .map(|view| view.config.sandbox)
+            .unwrap_or_default();
 
         // ----------------------------------------------------------------
         // Load user preferences from memory.
@@ -375,7 +379,11 @@ impl AgentLoop {
         let timeout_config = crate::ai::timeouts::TimeoutConfig::default();
         let mut plugins = crate::ai::plugins::PluginRegistry::new();
         plugins.register(Box::new(crate::ai::plugins::AuditLogger));
-        plugins.register(Box::new(crate::ai::plugins::RateLimiter::new(30)));
+        // Rate limit comes from the sandbox config, not a hardcoded 30, so the
+        // presets ("loose" 60 / "strict" 15) mean something at runtime.
+        plugins.register(Box::new(crate::ai::plugins::RateLimiter::new(
+            sandbox_config.max_calls_per_minute,
+        )));
 
         // Fire RunStart.
         plugins.fire(&crate::ai::plugins::PluginEvent::RunStart {
@@ -465,7 +473,28 @@ impl AgentLoop {
             let mut stream = llm.chat_stream(&messages, &tool_defs);
             let mut assistant_text = String::new();
             let mut tool_calls: Vec<OutgoingToolCall> = Vec::new();
-            while let Some(item) = stream.next().await {
+            loop {
+                // Bound every poll of the stream by the remaining run
+                // deadline so a hung provider connection (proxy that accepted
+                // the request but never sends a byte) surfaces as a terminal
+                // error event instead of freezing the loop forever. The
+                // client's own read timeout is the first line of defense;
+                // this is the backstop. Never panic on timeout.
+                let next = crate::ai::timeouts::with_timeout(deadline.remaining(), async {
+                    Ok::<_, AiError>(stream.next().await)
+                })
+                .await;
+                let item = match next {
+                    Ok(item) => item,
+                    Err(crate::ai::timeouts::TimeoutError::TimedOut) => {
+                        return Err(AiError::Llm(format!(
+                            "LLM stream stalled for more than {}s (run deadline)",
+                            timeout_config.run_deadline_secs
+                        )));
+                    }
+                    Err(crate::ai::timeouts::TimeoutError::Inner(e)) => return Err(e),
+                };
+                let Some(item) = item else { break };
                 match item? {
                     StreamEvent::TextDelta(t) => {
                         assistant_text.push_str(&t);
@@ -573,6 +602,8 @@ impl AgentLoop {
             // Dispatch each tool call.
             for call in &tool_calls {
                 if sink.is_cancelled() {
+                    // Keep the history provider-valid even on the error path.
+                    synthesize_missing_tool_results(&mut messages, &tool_calls);
                     return Err(AiError::Cancelled);
                 }
                 if deadline.is_expired() {
@@ -632,7 +663,7 @@ impl AgentLoop {
                             arguments: args.clone(),
                             summary: format!("{summary} (sandbox: {reason})"),
                         });
-                        let approved = matches!(sink.await_approval(&call.id).await, Ok(true));
+                        let approved = await_approval_bounded(&sink, &call.id).await;
                         if approved {
                             None
                         } else {
@@ -663,7 +694,7 @@ impl AgentLoop {
                                 arguments: args.clone(),
                                 summary,
                             });
-                            let approved = matches!(sink.await_approval(&call.id).await, Ok(true));
+                            let approved = await_approval_bounded(&sink, &call.id).await;
                             if approved {
                                 None
                             } else {
@@ -705,35 +736,31 @@ impl AgentLoop {
                             Err(crate::ai::timeouts::TimeoutError::Inner(e)) => Err(e),
                         };
 
-                        // Fire AfterTool.
-                        plugins.fire(&crate::ai::plugins::PluginEvent::AfterTool {
-                            run_id: "run",
-                            tool_name: &call.name,
-                            result: &result
-                                .as_ref()
-                                .map(|_| k7s_deps::serde_json::Value::Null)
-                                .map_err(|e| e.to_string()),
+                        // Fire AfterTool with the real payload — a successful
+                        // call carries its actual JSON so plugins (audit,
+                        // redaction, …) see the data instead of a Null
+                        // placeholder — and honour a Modify decision: the
+                        // rewritten value is what the UI and the LLM see.
+                        let plugin_result: Result<k7s_deps::serde_json::Value, String> =
+                            result.map_err(|e| e.to_string());
+                        let ok = plugin_result.is_ok();
+                        let effective_val =
+                            match plugins.fire(&crate::ai::plugins::PluginEvent::AfterTool {
+                                run_id: "run",
+                                tool_name: &call.name,
+                                result: &plugin_result,
+                            }) {
+                                crate::ai::plugins::PluginDecision::Modify(v) => v,
+                                _ => plugin_result.unwrap_or_else(
+                                    |e| k7s_deps::serde_json::json!({ "error": e }),
+                                ),
+                            };
+                        sink.emit(AgentEvent::ToolResult {
+                            call_id: call.id.clone(),
+                            ok,
+                            result: effective_val.clone(),
                         });
-
-                        match result {
-                            Ok(v) => {
-                                sink.emit(AgentEvent::ToolResult {
-                                    call_id: call.id.clone(),
-                                    ok: true,
-                                    result: v.clone(),
-                                });
-                                v
-                            }
-                            Err(e) => {
-                                let msg = e.to_string();
-                                sink.emit(AgentEvent::ToolResult {
-                                    call_id: call.id.clone(),
-                                    ok: false,
-                                    result: k7s_deps::serde_json::json!({ "error": msg }),
-                                });
-                                k7s_deps::serde_json::json!({ "error": msg })
-                            }
-                        }
+                        effective_val
                     }
                 };
 
@@ -744,6 +771,11 @@ impl AgentLoop {
                         .unwrap_or_else(|_| "{}".into()),
                 });
             }
+
+            // A deadline break above (or any early exit) can leave advertised
+            // calls unanswered — backfill synthetic results so the history we
+            // return stays provider-valid.
+            synthesize_missing_tool_results(&mut messages, &tool_calls);
         }
     }
 
@@ -773,6 +805,7 @@ impl AgentLoop {
             },
             duration_ms: start.elapsed().as_millis() as u64,
             turn_count,
+            scanned: false,
         });
         // Periodically scan and update strategies.
         store.scan_and_update();
@@ -785,6 +818,67 @@ impl AgentLoop {
 /// on assistant messages, even when `tool_calls` is also present.
 fn some_content(text: &str) -> Option<String> {
     Some(text.to_string())
+}
+
+/// How long the loop waits for a user decision on a pending write before
+/// treating it as a denial. Five minutes matches the overall run deadline:
+/// a prompt nobody answers must never hang the session forever.
+const APPROVAL_TIMEOUT_SECS: u64 = 300;
+
+/// Await a user approval decision with a hard cap. Timeout and a dropped
+/// response channel both count as "denied" so the LLM receives a tool
+/// result (the refusal) and the loop continues instead of hanging.
+async fn await_approval_bounded(sink: &Arc<dyn EventSink>, call_id: &str) -> bool {
+    match k7s_deps::tokio::time::timeout(
+        std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+        sink.await_approval(call_id),
+    )
+    .await
+    {
+        Ok(Ok(true)) => true,
+        Ok(_) => false,
+        Err(_) => {
+            k7s_deps::tracing::warn!(call_id, "approval timed out; treating as denied");
+            false
+        }
+    }
+}
+
+/// Backfill synthetic tool results for calls whose `Tool` message was never
+/// pushed (deadline hit or cancellation mid-dispatch). The assistant message
+/// already advertises every tool_call, and providers reject the next request
+/// with a 400 when any call lacks its paired result — the history handed back
+/// to the UI must therefore always be paired.
+fn synthesize_missing_tool_results(messages: &mut Vec<Message>, calls: &[OutgoingToolCall]) {
+    let Some(last_assistant) = messages.iter().rposition(|m| {
+        matches!(
+            m,
+            Message::Assistant {
+                tool_calls: Some(_),
+                ..
+            }
+        )
+    }) else {
+        return;
+    };
+    let answered: std::collections::HashSet<String> = messages[last_assistant..]
+        .iter()
+        .filter_map(|m| match m {
+            Message::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for call in calls {
+        if !answered.contains(&call.id) {
+            messages.push(Message::Tool {
+                tool_call_id: call.id.clone(),
+                content: k7s_deps::serde_json::json!({
+                    "error": "not executed: run interrupted before this tool was dispatched"
+                })
+                .to_string(),
+            });
+        }
+    }
 }
 
 /// Save assistant response to session (non-blocking, best-effort).
@@ -1030,14 +1124,10 @@ mod tests {
     }
 
     fn make_agent(script: Vec<Vec<StreamEvent>>) -> AgentLoop {
-        let llm = Arc::new(MockLlm::new(script));
+        // The factory hands each run a fresh mock scripted with the caller's
+        // turns (cloned because a factory may be invoked more than once).
         let factory: Arc<dyn Fn() -> Box<dyn LlmClient> + Send + Sync> =
-            Arc::new(move || Box::new(MockLlm::new(vec![])));
-        // The factory isn't used by run() if we pass our own agent; but
-        // AgentLoop::new needs one. Build the agent with a factory that
-        // reconstructs a fresh mock per call — for the test we instead build
-        // the agent and rely on factory producing a defaulting mock.
-        let _ = llm;
+            Arc::new(move || Box::new(MockLlm::new(script.clone())));
         AgentLoop::new(crate::ai::ToolRegistry::new(), factory)
     }
 

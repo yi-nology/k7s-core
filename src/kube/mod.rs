@@ -39,8 +39,8 @@ pub mod properties;
 pub mod restart;
 pub mod rollout;
 pub mod security;
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-#[cfg(not(target_os = "ios"))]
+// templates = YAML parse + API-server apply: no local binaries, compiles
+// anywhere its consumers do (k7s-commands/storage.rs imports it not(ios)).
 #[cfg(not(target_os = "ios"))]
 pub mod templates;
 pub mod watchers;

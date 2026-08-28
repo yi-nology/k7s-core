@@ -34,8 +34,15 @@ pub const HELM_LOG_EVENT: &str = "helm-op-log";
 pub const HELM_DONE_EVENT: &str = "helm-op-done";
 
 /// What the user asked for. One of these becomes a `helm <op> ...` invocation.
+///
+/// The wire shape is camelCase end to end: the frontend's `HelmOp` TS type
+/// (`frontend/src/providers/types/helm.ts`) names fields exactly like this
+/// enum's payloads (`createNamespace`, `timeoutSecs`, …), and the transports
+/// hand the whole `{ op: { op: "install", ... } }` object to serde. Without
+/// the rename, serde would expect snake_case and silently drop every
+/// camelCase flag into its `#[serde(default)]` — flags dead on the wire.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "camelCase")]
 pub enum HelmOp {
     Install(InstallArgs),
     Upgrade(UpgradeArgs),
@@ -44,6 +51,7 @@ pub enum HelmOp {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstallArgs {
     pub release: String,
     /// `repo/name`, an OCI URL, or a local absolute path (`.tgz` or unpacked
@@ -77,6 +85,7 @@ pub struct InstallArgs {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpgradeArgs {
     pub release: String,
     pub chart: String,
@@ -113,6 +122,7 @@ pub struct UpgradeArgs {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UninstallArgs {
     pub release: String,
     pub namespace: String,
@@ -124,6 +134,7 @@ pub struct UninstallArgs {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RollbackArgs {
     pub release: String,
     pub namespace: String,
@@ -559,6 +570,7 @@ struct LogLine<'a> {
 /// One row of `helm history <release>`. Surfaced in the UI for the
 /// "Revisions" tab on a release detail.
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RevisionEntry {
     pub revision: i64,
     pub updated: String,
@@ -973,5 +985,64 @@ mod tests {
             .any(|w| w == ["--values".to_string(), "/tmp/v.yaml".to_string()]));
         let bare = template_argv("/data/charts/demo-1.0.0", "", None);
         assert!(!bare.contains(&"--version".into()) && !bare.contains(&"--values".into()));
+    }
+
+    /// Wire round-trip: the frontend sends camelCase field names inside the
+    /// internally-tagged enum, and the transports hand the whole
+    /// `{ op: { op: "upgrade", ... } }` object to serde. Before the
+    /// `rename_all = "camelCase"` fix, every multi-word field was silently
+    /// dropped into its `#[serde(default)]` — flags dead on the wire.
+    #[test]
+    fn helm_op_roundtrips_camel_case_wire_payload() {
+        let op: HelmOp = serde_json::from_value(serde_json::json!({
+            "op": "upgrade",
+            "release": "r",
+            "chart": "/p",
+            "namespace": "ns",
+            "createNamespace": true,
+            "timeoutSecs": 300
+        }))
+        .expect("camelCase payload must deserialize");
+        let HelmOp::Upgrade(ref a) = op else {
+            panic!("expected the upgrade variant");
+        };
+        assert!(a.create_namespace, "createNamespace must survive the wire");
+        assert_eq!(
+            a.timeout_secs,
+            Some(300),
+            "timeoutSecs must survive the wire"
+        );
+        assert_eq!(a.release, "r");
+        assert_eq!(a.chart, "/p");
+        assert_eq!(a.namespace, "ns");
+        assert!(!a.dry_run, "absent flags keep their serde defaults");
+
+        // And the exact payload the transports now send parses back identically.
+        let round: HelmOp = serde_json::from_value(serde_json::to_value(&op).expect("serialize"))
+            .expect("own serialization must deserialize");
+        assert_eq!(
+            serde_json::to_value(&round).unwrap(),
+            serde_json::to_value(&op).unwrap()
+        );
+    }
+
+    /// The response side carries camelCase too: the frontend's
+    /// `HelmRevisionEntry.appVersion` reads the serialized `RevisionEntry`.
+    #[test]
+    fn revision_entry_serializes_camel_case() {
+        let row = RevisionEntry {
+            revision: 2,
+            updated: "2026-08-28T00:00:00Z".into(),
+            status: "deployed".into(),
+            chart: "demo-1.0.0".into(),
+            app_version: "1.0.0".into(),
+            description: String::new(),
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert!(
+            v.get("appVersion").is_some(),
+            "appVersion must be camelCase"
+        );
+        assert!(v.get("app_version").is_none());
     }
 }

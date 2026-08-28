@@ -26,6 +26,7 @@ pub mod image;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[cfg(not(target_os = "ios"))]
 pub mod ingress_debug;
+pub mod kubeconfig_check;
 pub mod logs;
 pub mod manager;
 pub mod mappers;

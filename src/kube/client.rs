@@ -68,14 +68,16 @@ pub fn list_contexts() -> AppResult<Vec<ContextInfo>> {
     Ok(contexts)
 }
 
-/// Read a kubeconfig file at an arbitrary path and list its contexts.
-///
-/// Used by the "Import kubeconfig" action. Contexts are reported with
-/// `current: false` — the notion of a "current" context belongs to the default
-/// kubeconfig, not to an imported file.
-pub fn contexts_from_file(path: &str) -> AppResult<Vec<ContextInfo>> {
-    let kubeconfig = Kubeconfig::read_from(path)?;
-    let contexts = kubeconfig
+/// Read a kubeconfig file from disk (the import paths' shared entry).
+pub fn read_kubeconfig(path: &str) -> AppResult<Kubeconfig> {
+    Ok(Kubeconfig::read_from(path)?)
+}
+
+/// Map a parsed kubeconfig into switcher entries. Entries report
+/// `current: false` — the notion of a "current" context belongs to the
+/// default kubeconfig, not to an imported file.
+pub fn contexts_from_kubeconfig(kubeconfig: &Kubeconfig) -> Vec<ContextInfo> {
+    kubeconfig
         .contexts
         .iter()
         .map(|ctx| {
@@ -90,8 +92,15 @@ pub fn contexts_from_file(path: &str) -> AppResult<Vec<ContextInfo>> {
                 current: false,
             }
         })
-        .collect();
-    Ok(contexts)
+        .collect()
+}
+
+/// Read a kubeconfig file at an arbitrary path and list its contexts.
+///
+/// Used by the "Import kubeconfig" action.
+pub fn contexts_from_file(path: &str) -> AppResult<Vec<ContextInfo>> {
+    let kubeconfig = read_kubeconfig(path)?;
+    Ok(contexts_from_kubeconfig(&kubeconfig))
 }
 
 /// Build a client for a context defined in a specific kubeconfig file (an imported

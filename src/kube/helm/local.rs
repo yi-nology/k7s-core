@@ -122,11 +122,19 @@ fn parse_tgz_metadata(path: &Path) -> AppResult<LocalChartEntry> {
         }
     }
     let meta = meta.ok_or_else(|| AppError::Other("no Chart.yaml in archive".into()))?;
+    // `.tar.gz` stems to `<id>.tar` (`demo-1.0.0.tar.gz` → `demo-1.0.0.tar`);
+    // strip the stray `.tar` so the id matches the `.tgz` naming and the
+    // delete/detail lookups (which retry archive extensions) resolve it.
     let id = path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .file_name()
+        .and_then(|f| f.to_str())
+        .and_then(|f| f.strip_suffix(".tar.gz").map(str::to_string))
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let modified = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -193,7 +201,13 @@ pub fn scan_local_charts(root: &Path) -> AppResult<Vec<LocalChartEntry>> {
         .filter_map(|e| e.ok())
     {
         let p = e.path();
-        if p.extension().map(|x| x == "tgz").unwrap_or(false) {
+        // Import accepts both spellings, so the listing must too — a
+        // `.tar.gz` whose extension is `gz` would otherwise never show.
+        let is_archive = p.extension().map(|x| x == "tgz").unwrap_or(false)
+            || p.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.ends_with(".tar.gz"));
+        if is_archive {
             match parse_tgz_metadata(&p) {
                 Ok(entry) => out.push(entry),
                 Err(err) => k7s_deps::tracing::warn!("skip {}: {err}", p.display()),
@@ -389,6 +403,23 @@ mod tests {
 
         // traversal id must be refused
         assert!(remove_chart(&tmp, "../../etc").is_err());
+        remove_chart(&tmp, &entry.id).unwrap();
+        assert!(scan_local_charts(&tmp).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_tar_gz_roundtrips_through_scan() {
+        let tmp = std::env::temp_dir().join(format!("k7s-import-targz-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Same bytes as .tgz — only the accepted filename differs. Import
+        // accepting .tar.gz while scan ignores it would make the chart
+        // silently vanish from the listing.
+        let bytes = tgz_bytes("demo", "2.0.0", &[]);
+        let entry = import_chart_bytes(&tmp, "demo-2.0.0.tar.gz", &bytes).unwrap();
+        assert_eq!(entry.name, "demo");
+        assert_eq!(entry.id, "demo-2.0.0");
+        assert_eq!(scan_local_charts(&tmp).unwrap().len(), 1);
         remove_chart(&tmp, &entry.id).unwrap();
         assert!(scan_local_charts(&tmp).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);

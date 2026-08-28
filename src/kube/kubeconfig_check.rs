@@ -157,7 +157,8 @@ pub fn validate_kubeconfig(kc: &Kubeconfig) -> Vec<KubeconfigIssue> {
                     // "https://" is the shortest legal form — anything that
                     // short carries no host at all.
                     if !(lower.starts_with("https://") || lower.starts_with("http://"))
-                        || server.trim().len() <= lower.split("://").next().map_or(0, |s| s.len() + 3)
+                        || server.trim().len()
+                            <= lower.split("://").next().map_or(0, |s| s.len() + 3)
                     {
                         issues.push(issue(
                             IssueSeverity::Error,
@@ -169,7 +170,10 @@ pub fn validate_kubeconfig(kc: &Kubeconfig) -> Vec<KubeconfigIssue> {
                             Some(name),
                         ));
                     } else if lower.starts_with("https://") {
-                        let c = cluster.cluster.as_ref().expect("cluster body matched above");
+                        let c = cluster
+                            .cluster
+                            .as_ref()
+                            .expect("cluster body matched above");
                         let has_ca = c.certificate_authority.is_some()
                             || c.certificate_authority_data.is_some();
                         if !has_ca && !c.insecure_skip_tls_verify.unwrap_or(false) {
@@ -187,9 +191,11 @@ pub fn validate_kubeconfig(kc: &Kubeconfig) -> Vec<KubeconfigIssue> {
 
         // Credential advisory — only meaningful once the user reference
         // resolves; a dangling user already reported above.
-        if let Some(nai) = body.user.as_deref().and_then(|user| {
-            kc.auth_infos.iter().find(|u| u.name == user)
-        }) {
+        if let Some(nai) = body
+            .user
+            .as_deref()
+            .and_then(|user| kc.auth_infos.iter().find(|u| u.name == user))
+        {
             let has_credentials = nai.auth_info.as_ref().is_some_and(|a| {
                 a.token.is_some()
                     || a.token_file.is_some()

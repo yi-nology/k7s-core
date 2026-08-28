@@ -374,8 +374,11 @@ fn build_argv(
 
 const DEFAULT_HELM_TIMEOUT: &str = "5m0s";
 
+/// `--timeout 0s` makes helm wait *forever*, and a 0 arriving over the wire
+/// means "unset" — clamp it to the default along with `None`.
 fn timeout_arg(secs: Option<u64>) -> String {
-    secs.map(|s| format!("{s}s"))
+    secs.filter(|s| *s > 0)
+        .map(|s| format!("{s}s"))
         .unwrap_or_else(|| DEFAULT_HELM_TIMEOUT.to_string())
 }
 
@@ -834,6 +837,20 @@ mod tests {
         let (_label, argv) =
             build_argv("helm", &HelmOp::Install(install_args()), &mut Vec::new()).unwrap();
         assert!(argv.windows(2).any(|w| w == ["--timeout", "5m0s"]));
+    }
+
+    /// `Some(0)` is "unset", not "wait forever": `--timeout 0s` would make
+    /// helm block indefinitely, so it clamps to the default like `None`.
+    #[test]
+    fn argv_timeout_zero_clamps_to_default() {
+        let mut a = install_args();
+        a.timeout_secs = Some(0);
+        let (_label, argv) = build_argv("helm", &HelmOp::Install(a), &mut Vec::new()).unwrap();
+        assert!(
+            argv.windows(2).any(|w| w == ["--timeout", "5m0s"]),
+            "argv: {argv:?}"
+        );
+        assert!(!argv.contains(&"0s".into()));
     }
 
     #[test]

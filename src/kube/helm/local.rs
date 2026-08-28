@@ -161,13 +161,20 @@ fn parse_dir_metadata(path: &Path) -> AppResult<LocalChartEntry> {
         std::fs::read_dir(p)
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
-                    .map(|e| {
+                    .filter_map(|e| {
+                        // `file_type()` (unlike `Path::is_dir`) does not
+                        // follow symlinks: a symlinked subdir must not pull
+                        // outside bytes into the size — or cycle to overflow.
+                        let ft = e.file_type().ok()?;
+                        if ft.is_symlink() {
+                            return None;
+                        }
                         let p = e.path();
-                        if p.is_dir() {
+                        Some(if ft.is_dir() {
                             dir_size(&p)
                         } else {
                             std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0)
-                        }
+                        })
                     })
                     .sum()
             })
@@ -228,6 +235,19 @@ pub fn scan_local_charts(root: &Path) -> AppResult<Vec<LocalChartEntry>> {
 /// Hard ceiling on an imported chart package — keeps a hostile upload from
 /// filling the disk before the gzip magic check even runs.
 pub const MAX_CHART_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Cap on a single decompressed member read (values.yaml, README, any file
+/// the viewer opens): a gzip-bomb member must not OOM the process. A
+/// truncated tail is acceptable for a read-only viewer.
+const MAX_MEMBER_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Read a chart member as UTF-8, capped at [`MAX_MEMBER_BYTES`] via
+/// [`Read::take`] — the remainder of an over-cap member is simply dropped.
+fn read_capped<R: Read>(r: R) -> std::io::Result<String> {
+    let mut s = String::new();
+    r.take(MAX_MEMBER_BYTES).read_to_string(&mut s)?;
+    Ok(s)
+}
 
 /// gzip files start with these two bytes; `.tgz` is always gzip.
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
@@ -369,6 +389,16 @@ fn dir_files(root: &Path) -> Vec<LocalChartFile> {
             return;
         };
         for e in rd.filter_map(|e| e.ok()) {
+            // `file_type()` (unlike `Path::is_dir`) does not follow symlinks:
+            // chart members have no legitimate symlinks, and following one
+            // would list entries outside the chart root — or, for a cycle,
+            // recurse until the stack overflows.
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             let child_rel = if rel.is_empty() {
@@ -376,7 +406,7 @@ fn dir_files(root: &Path) -> Vec<LocalChartFile> {
             } else {
                 format!("{rel}/{name}")
             };
-            if p.is_dir() {
+            if ft.is_dir() {
                 out.push(LocalChartFile {
                     path: child_rel.clone(),
                     size_bytes: 0,
@@ -431,11 +461,8 @@ fn read_member(path: &Path, inner: &str) -> AppResult<String> {
             if entry.header().entry_type().is_dir() {
                 return Err(AppError::Other("is a directory".into()));
             }
-            let mut s = String::new();
-            entry
-                .read_to_string(&mut s)
-                .map_err(|e| AppError::Other(format!("read {inner}: {e}")))?;
-            return Ok(s);
+            return read_capped(&mut entry)
+                .map_err(|e| AppError::Other(format!("read {inner}: {e}")));
         }
     }
     Err(AppError::NotFound(format!("no member `{inner}`")))
@@ -512,8 +539,9 @@ pub fn local_chart_file(root: &Path, id: &str, inner_path: &str) -> AppResult<St
             if !canon.starts_with(&base) {
                 return Err(AppError::Other("invalid chart member path".into()));
             }
-            std::fs::read_to_string(&canon)
-                .map_err(|e| AppError::Other(format!("read {inner}: {e}")))
+            let file = std::fs::File::open(&canon)
+                .map_err(|e| AppError::Other(format!("read {inner}: {e}")))?;
+            read_capped(file).map_err(|e| AppError::Other(format!("read {inner}: {e}")))
         }
     }
 }
@@ -687,6 +715,46 @@ mod tests {
             std::os::unix::fs::symlink("/etc/passwd", dir.join("escape")).unwrap();
             assert!(local_chart_file(&tmp, "my-chart", "escape").is_err());
         }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The dir walks (dir_size / dir_files) must not follow symlinks: a
+    /// symlinked subdir would list entries outside the chart root, and a
+    /// symlink cycle would recurse until the stack overflows. Unix-only —
+    /// symlink creation is what the test hinges on.
+    #[cfg(unix)]
+    #[test]
+    fn dir_walks_skip_symlinks() {
+        let tmp = std::env::temp_dir().join(format!("k7s-symlink-{}", std::process::id()));
+        let dir = tmp.join("my-chart");
+        std::fs::create_dir_all(dir.join("templates")).unwrap();
+        std::fs::write(
+            dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: my-chart\nversion: 1.0.0\n",
+        )
+        .unwrap();
+        // `outside` points out of the library entirely; `cycle` loops back
+        // to the chart dir — under the old is_dir()-based walks the latter
+        // crashed the process with a stack overflow.
+        std::os::unix::fs::symlink("/etc", dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("cycle")).unwrap();
+
+        let d = local_chart_detail(&tmp, "my-chart").unwrap();
+        assert!(d.files.iter().any(|f| f.path == "templates" && f.is_dir));
+        assert!(
+            d.files
+                .iter()
+                .all(|f| !f.path.starts_with("outside") && !f.path.starts_with("cycle")),
+            "symlinked dirs must not be walked: {:?}",
+            d.files
+        );
+        // Size counts real members only — following `outside` would pull
+        // all of /etc into the sum.
+        assert!(d.entry.size_bytes < 1024 * 1024);
+
+        // Reading through a symlinked member is refused by the confinement
+        // guard (canonicalised target escapes the chart dir).
+        assert!(local_chart_file(&tmp, "my-chart", "outside/hosts").is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

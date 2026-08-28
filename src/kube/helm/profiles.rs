@@ -87,16 +87,20 @@ fn read_file(dir: &Path) -> Vec<HelmProfile> {
     }
 }
 
-/// Write the profiles file atomically: serialise to a `.tmp` sibling in
-/// the same dir, then rename over the target — a crash mid-write leaves
-/// the previous file intact rather than a truncated one.
+/// Write the profiles file atomically: serialise to a uuid-named `.tmp`
+/// sibling in the same dir, then rename over the target — a crash mid-write
+/// leaves the previous file intact rather than a truncated one. The uuid
+/// suffix (mirroring `TempHelmFile`) keeps two concurrent saves from
+/// interleaving on one fixed `.tmp` name, which could leave a torn file
+/// that reads back as corrupt (i.e. all profiles "vanish" until the next
+/// save rewrites it).
 fn write_file(dir: &Path, profiles: Vec<HelmProfile>) -> AppResult<()> {
     std::fs::create_dir_all(dir)
         .map_err(|e| AppError::Other(format!("mkdir {}: {e}", dir.display())))?;
     let path = profiles_path(dir);
     let text = k7s_deps::serde_json::to_string_pretty(&ProfilesFile { profiles })
         .map_err(|e| AppError::Other(format!("serialise profiles: {e}")))?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("{}.tmp", k7s_deps::uuid::Uuid::new_v4()));
     std::fs::write(&tmp, text).map_err(|e| AppError::Other(format!("write tmp: {e}")))?;
     std::fs::rename(&tmp, &path).map_err(|e| AppError::Other(format!("rename: {e}")))?;
     Ok(())

@@ -974,16 +974,25 @@ mod tests {
         assert!(argv.contains(&"--create-namespace".into()));
     }
 
-    /// `helm template` argv: version/values flags appear only when asked for.
+    /// `helm template` argv: the three positionals sit in helm's required
+    /// order (`template <release> <chart>` — the release is the fixed
+    /// `preview` placeholder), and the version/values flags appear only
+    /// when asked for, appended after the positionals.
     #[test]
     fn template_argv_flags() {
         let argv = template_argv("repo/app", "1.2.3", Some("/tmp/v.yaml"));
         assert_eq!(argv[0], "template");
+        assert_eq!(argv[1], "preview");
+        assert_eq!(argv[2], "repo/app");
         assert!(argv.contains(&"--version".into()) && argv.contains(&"1.2.3".into()));
         assert!(argv
             .windows(2)
             .any(|w| w == ["--values".to_string(), "/tmp/v.yaml".to_string()]));
         let bare = template_argv("/data/charts/demo-1.0.0", "", None);
+        assert_eq!(
+            &bare[..3],
+            ["template", "preview", "/data/charts/demo-1.0.0"]
+        );
         assert!(!bare.contains(&"--version".into()) && !bare.contains(&"--values".into()));
     }
 

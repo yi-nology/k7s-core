@@ -338,13 +338,15 @@ pub struct LocalChartFile {
 }
 
 /// Everything the detail view needs: the entry, its file tree, and the
-/// two files the UI renders inline (empty string when absent).
+/// files the UI renders inline (empty string when absent).
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalChartDetail {
     pub entry: LocalChartEntry,
     /// Sorted ascending so the tree renders deterministically.
     pub files: Vec<LocalChartFile>,
+    /// Empty when the chart ships no Chart.yaml.
+    pub chart_yaml: String,
     /// Empty when the chart ships no values.yaml.
     pub values_yaml: String,
     /// Empty when the chart ships no README.md.
@@ -508,9 +510,11 @@ pub fn local_chart_detail(root: &Path, id: &str) -> AppResult<LocalChartDetail> 
             LocalChartKind::Dir => std::fs::read_to_string(path.join(inner)).unwrap_or_default(),
         }
     };
-    let (values_yaml, readme) = (read("values.yaml"), read("README.md"));
+    let (chart_yaml, values_yaml, readme) =
+        (read("Chart.yaml"), read("values.yaml"), read("README.md"));
     Ok(LocalChartDetail {
         entry,
+        chart_yaml,
         values_yaml,
         readme,
         files,
@@ -667,6 +671,7 @@ mod tests {
         let d = local_chart_detail(&tmp, "demo-1.0.0").unwrap();
         assert_eq!(d.entry.name, "demo");
         assert_eq!(d.values_yaml, "replicaCount: 2\n");
+        assert!(d.chart_yaml.contains("name: demo"));
         assert!(d
             .files
             .iter()
@@ -694,6 +699,7 @@ mod tests {
 
         let d = local_chart_detail(&tmp, "my-chart").unwrap();
         assert_eq!(d.values_yaml, "replicaCount: 9\n");
+        assert!(d.chart_yaml.contains("name: my-chart"));
         // no README on disk → empty string, not an error
         assert_eq!(d.readme, "");
         assert!(d

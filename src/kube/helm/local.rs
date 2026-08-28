@@ -22,8 +22,10 @@ pub enum LocalChartKind {
     Dir,
 }
 
-/// One chart in the local library, ready for the UI.
+/// One chart in the local library, ready for the UI. camelCase on the wire
+/// (Tauri IPC + web JSON) to match the frontend's `LocalChartEntry` types.
 #[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalChartEntry {
     /// "<name>-<version>"（tgz）or the directory's name.
     pub id: String,
@@ -308,6 +310,7 @@ pub fn remove_chart(root: &Path, id: &str) -> AppResult<()> {
 /// path as stored (kept under the chart's top-level dir, e.g.
 /// `demo/values.yaml`); for a dir chart it is relative to the chart root.
 #[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalChartFile {
     pub path: String,
     pub size_bytes: u64,
@@ -317,6 +320,7 @@ pub struct LocalChartFile {
 /// Everything the detail view needs: the entry, its file tree, and the
 /// two files the UI renders inline (empty string when absent).
 #[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalChartDetail {
     pub entry: LocalChartEntry,
     /// Sorted ascending so the tree renders deterministically.

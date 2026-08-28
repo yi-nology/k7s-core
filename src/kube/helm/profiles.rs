@@ -29,6 +29,11 @@ use std::path::{Path, PathBuf};
 /// The profiles file under a data dir.
 pub const PROFILES_FILE: &str = "helm-profiles.json";
 
+/// Hard cap on a profile's `values` text, in bytes. Values are stored
+/// inline in `helm-profiles.json`, so an unbounded paste (a 40 MB chart
+/// dump) would balloon the whole registry file that every dialog reads.
+pub const MAX_PROFILE_VALUES_BYTES: usize = 256 * 1024;
+
 /// A saved deployment configuration. camelCase on the wire (Tauri IPC +
 /// web JSON) to match the frontend's `HelmProfile` type.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -114,9 +119,14 @@ pub fn load_profiles(dir: &Path) -> Vec<HelmProfile> {
 
 /// Upsert a profile by name and return the full list, sorted by name.
 /// Overwriting an existing profile keeps its original `created_at`.
-/// The name is validated before the file is touched.
+/// The name and the `values` size are validated before the file is touched.
 pub fn save_profile(dir: &Path, p: HelmProfile) -> AppResult<Vec<HelmProfile>> {
     validate_profile_name(&p.name)?;
+    if p.values.len() > MAX_PROFILE_VALUES_BYTES {
+        return Err(AppError::Other(
+            "profile values exceed 256 KiB limit".into(),
+        ));
+    }
     let mut profiles = read_file(dir);
     match profiles.iter_mut().find(|e| e.name == p.name) {
         Some(existing) => {
@@ -277,6 +287,25 @@ mod tests {
         assert!(save_profile(&dir, p).is_err());
         // Nothing was written by either failed attempt.
         assert!(!profiles_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- values cap ----
+
+    /// A `values` payload over [`MAX_PROFILE_VALUES_BYTES`] is refused
+    /// before the file is touched; exactly at the cap still passes.
+    #[test]
+    fn save_rejects_values_over_cap_but_allows_exact_limit() {
+        let dir = tmp("values-cap");
+        let mut p = full_profile("huge", "2026-01-01T00:00:00Z");
+        p.values = "a".repeat(MAX_PROFILE_VALUES_BYTES + 1);
+        assert!(save_profile(&dir, p.clone()).is_err(), "cap + 1 refused");
+        // Nothing was written by the failed attempt.
+        assert!(!profiles_path(&dir).exists());
+
+        p.values = "a".repeat(MAX_PROFILE_VALUES_BYTES);
+        save_profile(&dir, p.clone()).unwrap();
+        assert_eq!(load_profiles(&dir), vec![p], "exactly at the cap saves");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

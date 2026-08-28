@@ -678,6 +678,92 @@ pub async fn render_default_values(
 }
 
 // ---------------------------------------------------------------------------
+// Offline template rendering (`helm template`)
+// ---------------------------------------------------------------------------
+
+/// Release-name placeholder handed to `helm template` (its first positional
+/// argument is the release name). Nothing is installed, so any constant works,
+/// but a fixed value keeps the rendered `Release.Name` output deterministic
+/// for diffing.
+const TEMPLATE_RELEASE_PLACEHOLDER: &str = "preview";
+
+/// Build the argv for `helm template <release> <chart> [--version v] [--values p]`.
+///
+/// Pure so the flag logic is unit-testable without a helm binary. `version`
+/// empty = omit `--version` (helm picks latest); `values_path` `None` =
+/// render with chart defaults. Deliberately NO `--wait`/`--timeout`: those
+/// are cluster-op flags and `helm template` is fully offline.
+fn template_argv(chart_ref: &str, version: &str, values_path: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        "template".into(),
+        TEMPLATE_RELEASE_PLACEHOLDER.into(),
+        chart_ref.to_string(),
+    ];
+    if !version.is_empty() {
+        argv.push("--version".into());
+        argv.push(version.to_string());
+    }
+    if let Some(p) = values_path {
+        argv.push("--values".into());
+        argv.push(p.to_string());
+    }
+    argv
+}
+
+/// Render a chart's templates to a manifest string (offline `helm template`,
+/// no cluster contact, nothing applied). `chart_ref` may be `repo/name`, an
+/// OCI URL, or a local absolute path — helm natively accepts all three.
+/// `version` empty = latest; `values` empty = chart defaults, otherwise the
+/// content lands in a guarded 0600 temp file; `kubeconfig` `Some` = temp file
+/// passed via `--kubeconfig` (helm needs a path, not a blob). Captures (not
+/// streams) the output; a non-zero exit is an `AppError::Other` carrying
+/// helm's stderr.
+pub async fn render_chart_templates(
+    chart_ref: &str,
+    version: &str,
+    values: &str,
+    kubeconfig: Option<&str>,
+) -> AppResult<String> {
+    let helm = which_helm().ok_or_else(|| {
+        AppError::Other(
+            "helm CLI not found in PATH — install Helm 3 (https://helm.sh/docs/intro/install/) and retry"
+                .into(),
+        )
+    })?;
+
+    // Both guards must outlive `cmd.output()` below — helm reads the paths
+    // while the process runs; they drop (deleting the files) after the result.
+    let values_guard = if values.trim().is_empty() {
+        None
+    } else {
+        Some(write_temp_values(values)?)
+    };
+    let kc_guard = kubeconfig.map(write_temp_kubeconfig).transpose()?;
+
+    let mut cmd = Command::new(&helm);
+    let values_path = values_guard
+        .as_ref()
+        .map(|g| g.path().display().to_string());
+    cmd.args(template_argv(chart_ref, version, values_path.as_deref()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(g) = &kc_guard {
+        cmd.arg("--kubeconfig").arg(g.path());
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| AppError::Other(format!("helm template: {e}")))?;
+    if !out.status.success() {
+        return Err(AppError::Other(format!(
+            "helm template: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -874,5 +960,18 @@ mod tests {
         let (_label, argv) = build_argv("helm", &HelmOp::Upgrade(a), &mut Vec::new()).unwrap();
         assert!(argv.contains(&"--force".into()));
         assert!(argv.contains(&"--create-namespace".into()));
+    }
+
+    /// `helm template` argv: version/values flags appear only when asked for.
+    #[test]
+    fn template_argv_flags() {
+        let argv = template_argv("repo/app", "1.2.3", Some("/tmp/v.yaml"));
+        assert_eq!(argv[0], "template");
+        assert!(argv.contains(&"--version".into()) && argv.contains(&"1.2.3".into()));
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["--values".to_string(), "/tmp/v.yaml".to_string()]));
+        let bare = template_argv("/data/charts/demo-1.0.0", "", None);
+        assert!(!bare.contains(&"--version".into()) && !bare.contains(&"--values".into()));
     }
 }

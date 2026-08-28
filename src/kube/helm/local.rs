@@ -11,7 +11,7 @@ use k7s_deps::flate2::read::GzDecoder;
 use k7s_deps::tar;
 use k7s_deps::yaml_serde;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How a chart sits in the library: a `helm package` archive or an unpacked
 /// chart dir. The kind decides how Chart.yaml is read and what `id` is.
@@ -304,6 +304,216 @@ pub fn remove_chart(root: &Path, id: &str) -> AppResult<()> {
     .map_err(|e| AppError::Other(format!("delete {}: {e}", canon.display())))
 }
 
+/// One node of a chart's file tree. For a tgz the path is the tar member
+/// path as stored (kept under the chart's top-level dir, e.g.
+/// `demo/values.yaml`); for a dir chart it is relative to the chart root.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LocalChartFile {
+    pub path: String,
+    pub size_bytes: u64,
+    pub is_dir: bool,
+}
+
+/// Everything the detail view needs: the entry, its file tree, and the
+/// two files the UI renders inline (empty string when absent).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LocalChartDetail {
+    pub entry: LocalChartEntry,
+    /// Sorted ascending so the tree renders deterministically.
+    pub files: Vec<LocalChartFile>,
+    /// Empty when the chart ships no values.yaml.
+    pub values_yaml: String,
+    /// Empty when the chart ships no README.md.
+    pub readme: String,
+}
+
+/// Collect (path, size, is_dir) for one chart package, entry by entry —
+/// the same read-only streaming as the metadata parse, no unpacking.
+fn tgz_files(path: &Path) -> AppResult<Vec<LocalChartFile>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| AppError::Other(format!("open {}: {e}", path.display())))?;
+    let mut out = Vec::new();
+    for entry in tar::Archive::new(GzDecoder::new(file))
+        .entries()
+        .map_err(|e| AppError::Other(format!("tar entries: {e}")))?
+    {
+        let entry = entry.map_err(|e| AppError::Other(format!("tar entry: {e}")))?;
+        let rel = entry
+            .path()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_default();
+        if rel.is_empty() {
+            continue;
+        }
+        out.push(LocalChartFile {
+            path: rel,
+            size_bytes: entry.size(),
+            is_dir: entry.header().entry_type().is_dir(),
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/// Collect the file tree of an unpacked chart dir, recursively. Read errors
+/// degrade to skipping (size 0 / missing subtree), matching the scan's
+/// skip-don't-fail policy.
+fn dir_files(root: &Path) -> Vec<LocalChartFile> {
+    fn walk(base: &Path, rel: &str, out: &mut Vec<LocalChartFile>) {
+        let Ok(rd) = std::fs::read_dir(base) else {
+            return;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if p.is_dir() {
+                out.push(LocalChartFile {
+                    path: child_rel.clone(),
+                    size_bytes: 0,
+                    is_dir: true,
+                });
+                walk(&p, &child_rel, out);
+            } else {
+                out.push(LocalChartFile {
+                    path: child_rel,
+                    size_bytes: std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
+                    is_dir: false,
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Chart-root-relative form of a tar member path: helm packages store
+/// everything under a single top-level dir named after the *chart*
+/// (`demo/…` inside `demo-1.0.0.tgz` — the file stem is not it), so we
+/// strip whatever the archive's own first component is.
+fn chart_root_rel(rel: &str) -> &str {
+    match rel.split_once('/') {
+        Some((_, rest)) => rest,
+        None => rel,
+    }
+}
+
+/// Read one member out of a `.tgz` by streaming — the archive is never
+/// unpacked and `inner` is never joined onto the disk, so there is no
+/// filesystem surface for a hostile member path. Both spellings are
+/// accepted: the full member path (`demo/values.yaml`) and the
+/// chart-root-relative one (`values.yaml`).
+fn read_member(path: &Path, inner: &str) -> AppResult<String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| AppError::Other(format!("open {}: {e}", path.display())))?;
+    for entry in tar::Archive::new(GzDecoder::new(file))
+        .entries()
+        .map_err(|e| AppError::Other(format!("tar entries: {e}")))?
+    {
+        let mut entry = entry.map_err(|e| AppError::Other(format!("tar entry: {e}")))?;
+        let rel = entry
+            .path()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_default();
+        if rel == inner || chart_root_rel(&rel) == inner {
+            if entry.header().entry_type().is_dir() {
+                return Err(AppError::Other("is a directory".into()));
+            }
+            let mut s = String::new();
+            entry
+                .read_to_string(&mut s)
+                .map_err(|e| AppError::Other(format!("read {inner}: {e}")))?;
+            return Ok(s);
+        }
+    }
+    Err(AppError::NotFound(format!("no member `{inner}`")))
+}
+
+/// Refuse anything that could escape the chart: absolute or `..` components.
+fn safe_inner_path(inner: &str) -> AppResult<&str> {
+    let p = Path::new(inner);
+    if p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(AppError::Other("invalid chart member path".into()));
+    }
+    Ok(inner)
+}
+
+/// Resolve an id from the listing (not by guessing filenames): the scan is
+/// the single source of truth for what a valid id is.
+fn resolve(root: &Path, id: &str) -> AppResult<(PathBuf, LocalChartEntry)> {
+    scan_local_charts(root)?
+        .into_iter()
+        .find(|e| e.id == id)
+        .map(|e| (PathBuf::from(&e.path), e))
+        .ok_or_else(|| AppError::NotFound(format!("chart `{id}`")))
+}
+
+/// Detail view: entry + file tree + values.yaml + README. The two inline
+/// files degrade to empty strings, not errors — a chart without a README
+/// is normal, not a failure.
+pub fn local_chart_detail(root: &Path, id: &str) -> AppResult<LocalChartDetail> {
+    let (path, entry) = resolve(root, id)?;
+    let files = match entry.kind {
+        LocalChartKind::Tgz => tgz_files(&path)?,
+        LocalChartKind::Dir => dir_files(&path),
+    };
+    // `kind` is Copy — capturing it (not `entry`) lets the closure run
+    // before `entry` moves into the result.
+    let kind = entry.kind;
+    let read = |inner: &str| -> String {
+        match kind {
+            LocalChartKind::Tgz => read_member(&path, inner).unwrap_or_default(),
+            LocalChartKind::Dir => std::fs::read_to_string(path.join(inner)).unwrap_or_default(),
+        }
+    };
+    let (values_yaml, readme) = (read("values.yaml"), read("README.md"));
+    Ok(LocalChartDetail {
+        entry,
+        values_yaml,
+        readme,
+        files,
+    })
+}
+
+/// Read one file out of a chart by member path. `inner` is validated
+/// first (no absolute / `..`), and for dir charts the joined path is
+/// canonicalised and re-confined under the chart dir, so a symlink
+/// planted inside the library cannot redirect a read outside it.
+pub fn local_chart_file(root: &Path, id: &str, inner_path: &str) -> AppResult<String> {
+    let inner = safe_inner_path(inner_path)?;
+    let (path, entry) = resolve(root, id)?;
+    match entry.kind {
+        LocalChartKind::Tgz => read_member(&path, inner),
+        LocalChartKind::Dir => {
+            let base = path
+                .canonicalize()
+                .map_err(|e| AppError::NotFound(format!("chart `{id}`: {e}")))?;
+            let canon = base
+                .join(inner)
+                .canonicalize()
+                .map_err(|e| AppError::NotFound(format!("{inner}: {e}")))?;
+            // Both sides canonicalised: a `..`-free inner joined to a
+            // symlinked dir would otherwise slip past a raw prefix check.
+            if !canon.starts_with(&base) {
+                return Err(AppError::Other("invalid chart member path".into()));
+            }
+            std::fs::read_to_string(&canon)
+                .map_err(|e| AppError::Other(format!("read {inner}: {e}")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +615,74 @@ mod tests {
         assert!(remove_chart(&tmp, "../../etc").is_err());
         remove_chart(&tmp, &entry.id).unwrap();
         assert!(scan_local_charts(&tmp).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detail_lists_files_and_reads_values() {
+        let tmp = std::env::temp_dir().join(format!("k7s-detail-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bytes = tgz_bytes(
+            "demo",
+            "1.0.0",
+            &[
+                ("values.yaml", "replicaCount: 2\n"),
+                ("templates/deploy.yaml", "apiVersion: apps/v1\n"),
+            ],
+        );
+        import_chart_bytes(&tmp, "demo-1.0.0.tgz", &bytes).unwrap();
+
+        let d = local_chart_detail(&tmp, "demo-1.0.0").unwrap();
+        assert_eq!(d.entry.name, "demo");
+        assert_eq!(d.values_yaml, "replicaCount: 2\n");
+        assert!(d
+            .files
+            .iter()
+            .any(|f| f.path.ends_with("templates/deploy.yaml")));
+
+        // inner file read, and traversal refusal
+        let tpl = local_chart_file(&tmp, "demo-1.0.0", "templates/deploy.yaml").unwrap();
+        assert!(tpl.contains("apps/v1"));
+        assert!(local_chart_file(&tmp, "demo-1.0.0", "../../../etc/passwd").is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dir_chart_detail_and_traversal_refusal() {
+        let tmp = std::env::temp_dir().join(format!("k7s-dir-detail-{}", std::process::id()));
+        let dir = tmp.join("my-chart");
+        std::fs::create_dir_all(dir.join("templates")).unwrap();
+        std::fs::write(
+            dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: my-chart\nversion: 3.0.0\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("values.yaml"), "replicaCount: 9\n").unwrap();
+        std::fs::write(dir.join("templates/deploy.yaml"), "apiVersion: apps/v1\n").unwrap();
+
+        let d = local_chart_detail(&tmp, "my-chart").unwrap();
+        assert_eq!(d.values_yaml, "replicaCount: 9\n");
+        // no README on disk → empty string, not an error
+        assert_eq!(d.readme, "");
+        assert!(d
+            .files
+            .iter()
+            .any(|f| f.path == "templates/deploy.yaml" && !f.is_dir));
+        assert!(d.files.iter().any(|f| f.path == "templates" && f.is_dir));
+
+        let tpl = local_chart_file(&tmp, "my-chart", "templates/deploy.yaml").unwrap();
+        assert!(tpl.contains("apps/v1"));
+        assert!(local_chart_file(&tmp, "my-chart", "nope.yaml").is_err());
+        // absolute and `..` members are refused before any join
+        assert!(local_chart_file(&tmp, "my-chart", "/etc/passwd").is_err());
+        assert!(local_chart_file(&tmp, "my-chart", "../../../etc/passwd").is_err());
+        // a `..`-free member that is a symlink out of the chart dir must
+        // still be refused — this is what the canonicalise guard is for.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", dir.join("escape")).unwrap();
+            assert!(local_chart_file(&tmp, "my-chart", "escape").is_err());
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -46,6 +46,8 @@ pub enum HelmOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstallArgs {
     pub release: String,
+    /// `repo/name`, an OCI URL, or a local absolute path (`.tgz` or unpacked
+    /// directory) — helm natively accepts all three, so no argv branch needed.
     pub chart: String,
     /// Chart version; empty = latest.
     #[serde(default)]
@@ -60,9 +62,18 @@ pub struct InstallArgs {
     /// True to render templates without applying.
     #[serde(default)]
     pub dry_run: bool,
-    /// Override release name; we install with `--generate-name` if unset.
+    /// Create the target namespace if it does not exist (`--create-namespace`).
     #[serde(default)]
     pub create_namespace: bool,
+    /// Extra overrides; each key expands to one `--set k=v` pair.
+    #[serde(default)]
+    pub set: Option<k7s_deps::serde_json::Map<String, k7s_deps::serde_json::Value>>,
+    /// True to roll back automatically on failure (`--atomic`).
+    #[serde(default)]
+    pub atomic: bool,
+    /// Overrides the default 5m0s helm timeout.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +95,21 @@ pub struct UpgradeArgs {
     /// Roll back to this revision on failure.
     #[serde(default)]
     pub rollback_on_failure: bool,
+    /// Create the target namespace if it does not exist (`--create-namespace`).
+    #[serde(default)]
+    pub create_namespace: bool,
+    /// Extra overrides; each key expands to one `--set k=v` pair.
+    #[serde(default)]
+    pub set: Option<k7s_deps::serde_json::Map<String, k7s_deps::serde_json::Value>>,
+    /// True to roll back automatically on failure (`--atomic`).
+    #[serde(default)]
+    pub atomic: bool,
+    /// Force resource updates through the replacement strategy (`--force`).
+    #[serde(default)]
+    pub force: bool,
+    /// Overrides the default 5m0s helm timeout.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -277,6 +303,10 @@ fn build_argv(
                 argv.push("--dry-run".into());
                 argv.push("--debug".into()); // dry-run alone suppresses most output
             }
+            push_set_args(&mut argv, &args.set);
+            if args.atomic {
+                argv.push("--atomic".into());
+            }
             push_values_args(&mut argv, &args.values, temp_files);
         }
         HelmOp::Upgrade(args) => {
@@ -299,6 +329,16 @@ fn build_argv(
             if args.dry_run {
                 argv.push("--dry-run".into());
                 argv.push("--debug".into());
+            }
+            push_set_args(&mut argv, &args.set);
+            if args.atomic {
+                argv.push("--atomic".into());
+            }
+            if args.force {
+                argv.push("--force".into());
+            }
+            if args.create_namespace {
+                argv.push("--create-namespace".into());
             }
             push_values_args(&mut argv, &args.values, temp_files);
         }
@@ -328,8 +368,42 @@ fn build_argv(
     // Always ask helm to be explicit about what it did.
     argv.push("--wait".into()); // wait until pods are ready
     argv.push("--timeout".into());
-    argv.push("5m0s".into());
+    argv.push(timeout_arg(install_or_upgrade_timeout_secs(op)));
     Ok((label, argv))
+}
+
+const DEFAULT_HELM_TIMEOUT: &str = "5m0s";
+
+fn timeout_arg(secs: Option<u64>) -> String {
+    secs.map(|s| format!("{s}s"))
+        .unwrap_or_else(|| DEFAULT_HELM_TIMEOUT.to_string())
+}
+
+/// `Rollback`/`Uninstall` carry no timeout field and keep the default.
+fn install_or_upgrade_timeout_secs(op: &HelmOp) -> Option<u64> {
+    match op {
+        HelmOp::Install(a) => a.timeout_secs,
+        HelmOp::Upgrade(a) => a.timeout_secs,
+        _ => None,
+    }
+}
+
+/// `--set k=v` per top-level key. Objects/arrays serialise to JSON strings —
+/// helm understands `--set a={"b":1}` well enough for scalars; complex nests
+/// should go through `values` (the temp-file path) instead.
+fn push_set_args(
+    argv: &mut Vec<String>,
+    set: &Option<k7s_deps::serde_json::Map<String, k7s_deps::serde_json::Value>>,
+) {
+    let Some(map) = set else { return };
+    for (k, v) in map {
+        let val = match v {
+            k7s_deps::serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        argv.push("--set".into());
+        argv.push(format!("{k}={val}"));
+    }
 }
 
 fn push_values_args(argv: &mut Vec<String>, values: &str, temp_files: &mut Vec<TempHelmFile>) {
@@ -607,6 +681,23 @@ pub async fn render_default_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k7s_deps::serde_json;
+
+    fn install_args() -> InstallArgs {
+        InstallArgs {
+            release: "rel".into(),
+            chart: "demo".into(),
+            version: String::new(),
+            namespace: "default".into(),
+            kubeconfig: None,
+            values: String::new(),
+            dry_run: false,
+            create_namespace: false,
+            set: None,
+            atomic: false,
+            timeout_secs: None,
+        }
+    }
 
     /// `--keep-history` must appear only when the user asked to keep it:
     /// helm's own default is to delete release history, and the previous
@@ -645,6 +736,9 @@ mod tests {
             values: "replicaCount: 2".into(),
             dry_run: false,
             create_namespace: false,
+            set: None,
+            atomic: false,
+            timeout_secs: None,
         });
         let mut guards = Vec::new();
         let (_, argv) = build_argv("helm", &op, &mut guards).unwrap();
@@ -666,6 +760,9 @@ mod tests {
             values: "__file:/tmp/pre-written.yaml".into(),
             dry_run: false,
             create_namespace: false,
+            set: None,
+            atomic: false,
+            timeout_secs: None,
         });
         let mut guards = Vec::new();
         let (_, argv) = build_argv("helm", &op, &mut guards).unwrap();
@@ -713,5 +810,52 @@ mod tests {
         let a = write_temp_kubeconfig("x").unwrap();
         let b = write_temp_kubeconfig("x").unwrap();
         assert_ne!(a.path(), b.path());
+    }
+
+    #[test]
+    fn argv_honors_new_flags() {
+        let mut a = install_args();
+        a.set = Some(serde_json::Map::from_iter([(
+            "replicaCount".to_string(),
+            serde_json::json!(3),
+        )]));
+        a.atomic = true;
+        a.timeout_secs = Some(600);
+        let mut tmp = Vec::new();
+        let (_label, argv) = build_argv("helm", &HelmOp::Install(a), &mut tmp).unwrap();
+        assert!(argv.contains(&"--set".into()));
+        assert!(argv.windows(2).any(|w| w == ["--set", "replicaCount=3"]));
+        assert!(argv.contains(&"--atomic".into()));
+        assert!(argv.windows(2).any(|w| w == ["--timeout", "600s"]));
+    }
+
+    #[test]
+    fn argv_default_timeout_unchanged() {
+        let (_label, argv) =
+            build_argv("helm", &HelmOp::Install(install_args()), &mut Vec::new()).unwrap();
+        assert!(argv.windows(2).any(|w| w == ["--timeout", "5m0s"]));
+    }
+
+    #[test]
+    fn upgrade_argvs_add_force_and_create_ns() {
+        let a = UpgradeArgs {
+            release: "rel".into(),
+            chart: "demo".into(),
+            version: String::new(),
+            namespace: "default".into(),
+            kubeconfig: None,
+            values: String::new(),
+            dry_run: false,
+            reuse_values: false,
+            rollback_on_failure: false,
+            force: true,
+            create_namespace: true,
+            atomic: false,
+            timeout_secs: None,
+            set: None,
+        };
+        let (_label, argv) = build_argv("helm", &HelmOp::Upgrade(a), &mut Vec::new()).unwrap();
+        assert!(argv.contains(&"--force".into()));
+        assert!(argv.contains(&"--create-namespace".into()));
     }
 }

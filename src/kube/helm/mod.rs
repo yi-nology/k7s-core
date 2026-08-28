@@ -18,7 +18,7 @@
 //!     hole behind a different door.
 //!
 //! Module layout: marketplace in [`market`], repo/rollback ops in [`ops`],
-//! local chart library in [`local`].
+//! local chart library in [`local`], deployment profiles in [`profiles`].
 
 // market shells out to the helm binary via ops — desktop/web only, like ops.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -30,6 +30,10 @@ pub mod ops;
 // the local chart library is pure filesystem work but sits with its siblings
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod local;
+
+// deployment profiles are pure filesystem state too, same gate as local
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub mod profiles;
 
 use crate::kube::dto::{Cell, Row, Tone};
 use k7s_deps::base64::Engine;

@@ -17,7 +17,8 @@
 //!     docs/verification.md), so it redacts them here too rather than leaving a
 //!     hole behind a different door.
 //!
-//! Module layout: marketplace in [`market`], repo/rollback ops in [`ops`].
+//! Module layout: marketplace in [`market`], repo/rollback ops in [`ops`],
+//! local chart library in [`local`].
 
 // market shells out to the helm binary via ops — desktop/web only, like ops.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -25,6 +26,10 @@ pub mod market;
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod ops;
+
+// the local chart library is pure filesystem work but sits with its siblings
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub mod local;
 
 use crate::kube::dto::{Cell, Row, Tone};
 use k7s_deps::base64::Engine;

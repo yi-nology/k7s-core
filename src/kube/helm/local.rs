@@ -2,10 +2,11 @@
 //!
 //! ChartOps parity: scan a directory of `.tgz` packages / unpacked chart
 //! dirs, parse their Chart.yaml, and expose entries for the UI. Pure
-//! functions taking the library root as a parameter — the command layer
-//! supplies `<data_dir>/charts`. tar entries are READ ONLY: we never
+//! functions taking the library root as a parameter — [`charts_dir`] builds
+//! it as `<data_dir>/charts`. tar entries are READ ONLY: we never
 //! `unpack` onto disk, so a malicious archive has no filesystem surface.
 
+use crate::core::audit;
 use crate::error::{AppError, AppResult};
 use k7s_deps::flate2::read::GzDecoder;
 use k7s_deps::tar;
@@ -198,6 +199,13 @@ fn parse_dir_metadata(path: &Path) -> AppResult<LocalChartEntry> {
     ))
 }
 
+/// The on-disk root of the local chart library: `<data_dir>/charts`. Shared
+/// by the Tauri command layer and the MCP server (and their tests) so every
+/// transport — and every audit record — agrees on one library location.
+pub fn charts_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("charts")
+}
+
 /// Scan the library root: every `*.tgz` file and every dir containing a
 /// Chart.yaml. Corrupt archives are skipped (logged), never fatal.
 pub fn scan_local_charts(root: &Path) -> AppResult<Vec<LocalChartEntry>> {
@@ -269,6 +277,8 @@ fn sanitize_filename(name: &str) -> AppResult<String> {
 /// Import a chart from raw bytes: size-gate, gzip-magic-gate, sanitise the
 /// filename, write it under the library root, then verify it parses as a
 /// chart (a file that fails metadata is removed again — no corrupt residue).
+/// Success-only audited (`local_chart_import`) right here in the core layer,
+/// so MCP imports land in the trail the same way desktop imports do.
 pub fn import_chart_bytes(root: &Path, filename: &str, bytes: &[u8]) -> AppResult<LocalChartEntry> {
     let name = sanitize_filename(filename)?;
     if bytes.len() as u64 > MAX_CHART_BYTES {
@@ -286,7 +296,18 @@ pub fn import_chart_bytes(root: &Path, filename: &str, bytes: &[u8]) -> AppResul
     std::fs::write(&dest, bytes)
         .map_err(|e| AppError::Other(format!("write {}: {e}", dest.display())))?;
     match parse_tgz_metadata(&dest) {
-        Ok(entry) => Ok(entry),
+        Ok(entry) => {
+            // Success-only audit: only a verified chart on disk is recorded.
+            audit::record(
+                "local_chart_import",
+                k7s_deps::serde_json::json!({
+                    "name": entry.name.clone(),
+                    "version": entry.version.clone(),
+                    "bytes": bytes.len(),
+                }),
+            );
+            Ok(entry)
+        }
         Err(e) => {
             // Don't leave a corrupt file behind just because metadata failed.
             let _ = std::fs::remove_file(&dest);
@@ -299,6 +320,7 @@ pub fn import_chart_bytes(root: &Path, filename: &str, bytes: &[u8]) -> AppResul
 /// (canonicalised), so `../` tricks and absolute paths are refused. A tgz
 /// id is the file *stem* (`demo-1.0.0`), so the archive extensions are
 /// retried when the bare id doesn't name a dir chart directly.
+/// Success-only audited (`local_chart_remove`) at the core layer.
 pub fn remove_chart(root: &Path, id: &str) -> AppResult<()> {
     let root = root
         .canonicalize()
@@ -323,7 +345,12 @@ pub fn remove_chart(root: &Path, id: &str) -> AppResult<()> {
     } else {
         std::fs::remove_file(&canon)
     }
-    .map_err(|e| AppError::Other(format!("delete {}: {e}", canon.display())))
+    .map_err(|e| AppError::Other(format!("delete {}: {e}", canon.display())))?;
+    audit::record(
+        "local_chart_remove",
+        k7s_deps::serde_json::json!({ "id": id }),
+    );
+    Ok(())
 }
 
 /// One node of a chart's file tree. For a tgz the path is the tar member
@@ -624,7 +651,9 @@ fn deps_argv(path: &Path, action: DepsAction) -> Vec<String> {
 /// we cannot parse — either way the caller must not show a stale entry).
 ///
 /// NOTE: this shells out to the helm binary; there is no in-process
-/// fallback, mirroring lint/verify.
+/// fallback, mirroring lint/verify. Success-only audited
+/// (`local_chart_package`) at the core layer, so MCP packages are recorded
+/// too.
 pub async fn package_chart(root: &Path, id: &str) -> AppResult<LocalChartEntry> {
     let (path, entry) = resolve(root, id)?;
     if entry.kind == LocalChartKind::Tgz {
@@ -635,7 +664,7 @@ pub async fn package_chart(root: &Path, id: &str) -> AppResult<LocalChartEntry> 
     // filename is brittle; the re-scan is the same source of truth the
     // listing uses. It sorts newest-first, so the first name match is the
     // archive helm just wrote (an older tgz of the same chart loses).
-    scan_local_charts(root)?
+    let packaged = scan_local_charts(root)?
         .into_iter()
         .find(|e| e.kind == LocalChartKind::Tgz && e.name == entry.name)
         .ok_or_else(|| {
@@ -643,16 +672,33 @@ pub async fn package_chart(root: &Path, id: &str) -> AppResult<LocalChartEntry> 
                 "helm package produced no readable archive for `{}`",
                 entry.name
             ))
-        })
+        })?;
+    audit::record(
+        "local_chart_package",
+        k7s_deps::serde_json::json!({
+            "id": id,
+            "name": packaged.name.clone(),
+            "version": packaged.version.clone(),
+        }),
+    );
+    Ok(packaged)
 }
 
 /// Run `helm dependency list|build|update` on a chart from the local
-/// library and return the report. `List` is read-only; `Build`/`Update`
-/// write Chart.lock and populate the charts/ cache inside the chart dir —
-/// the command layer audits those two, like every other mutating op.
+/// library and return the report. `List` is read-only — no audit;
+/// `Build`/`Update` write Chart.lock and populate the charts/ cache inside
+/// the chart dir, so those two are audited (`local_chart_deps`) right here
+/// at the core layer, success-only, with the serialized lowercase action.
 pub async fn chart_deps(root: &Path, id: &str, action: DepsAction) -> AppResult<String> {
     let (path, _entry) = resolve(root, id)?;
-    super::ops::helm_capture(deps_argv(&path, action), None).await
+    let out = super::ops::helm_capture(deps_argv(&path, action), None).await?;
+    if !matches!(action, DepsAction::List) {
+        audit::record(
+            "local_chart_deps",
+            k7s_deps::serde_json::json!({ "id": id, "action": action }),
+        );
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1055,5 +1101,53 @@ mod tests {
         remove_chart(&tmp, &entry.id).unwrap();
         assert!(scan_local_charts(&tmp).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- audit lives in the write fns (command layer + MCP both flow here) ----
+
+    /// Import and remove must append their audit records themselves — the
+    /// audit used to sit in the Tauri command layer only, so MCP writes went
+    /// unrecorded. `set_dir` is OnceLock first-writer-wins and no other test
+    /// in this binary calls it, so this dir wins for the whole process; the
+    /// parallel import tests may append to it too, hence assertions are
+    /// CONTAINS on action strings, never exact line counts.
+    #[test]
+    fn import_and_remove_append_audit_records() {
+        let audit_dir =
+            std::env::temp_dir().join(format!("k7s-local-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&audit_dir);
+        std::fs::create_dir_all(&audit_dir).unwrap();
+        crate::core::audit::set_dir(audit_dir.clone());
+
+        let tmp = std::env::temp_dir().join(format!("k7s-audit-chart-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bytes = tgz_bytes("demo", "1.0.0", &[]);
+        let entry = import_chart_bytes(&tmp, "demo-1.0.0.tgz", &bytes).unwrap();
+        remove_chart(&tmp, &entry.id).unwrap();
+
+        let log = std::fs::read_to_string(audit_dir.join("audit.log")).unwrap();
+        assert!(
+            log.contains("\"local_chart_import\""),
+            "import must be audited, log:\n{log}"
+        );
+        assert!(
+            log.contains("\"local_chart_remove\""),
+            "remove must be audited, log:\n{log}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Parallel tests may still be appending to the winning audit dir; a
+        // best-effort removal (errors ignored) is all the cleanup it needs.
+        let _ = std::fs::remove_dir_all(&audit_dir);
+    }
+
+    /// The shared library-root helper: exactly `<data_dir>/charts`, the one
+    /// path both the Tauri command layer and the MCP server must agree on.
+    #[test]
+    fn charts_dir_joins_charts_under_data_dir() {
+        assert_eq!(
+            charts_dir(Path::new("/home/u/.k7s")),
+            PathBuf::from("/home/u/.k7s/charts")
+        );
     }
 }

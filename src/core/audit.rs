@@ -72,7 +72,14 @@ fn record_to(dir: &std::path::Path, action: &str, detail: Value) {
             }
         }
     }
-    if let Err(e) = writeln!(file, "{line}") {
+    // One write_all per record: rendering the Value through `writeln!`
+    // issues many small writes (serde_json writes fragment by fragment),
+    // and concurrent callers would interleave mid-record, tearing lines.
+    // A single O_APPEND write keeps every record an intact line even when
+    // parallel operations audit at the same time.
+    let mut buf = line.to_string();
+    buf.push('\n');
+    if let Err(e) = file.write_all(buf.as_bytes()) {
         k7s_deps::tracing::warn!("audit: could not append to {}: {e}", path.display());
     }
 }

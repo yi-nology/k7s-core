@@ -27,6 +27,7 @@ use k7s_deps::tokio::process::Command;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::OnceLock;
 
 /// Tauri event name carrying a single log line from a running `helm` invocation.
 pub const HELM_LOG_EVENT: &str = "helm-op-log";
@@ -722,11 +723,46 @@ fn template_argv(chart_ref: &str, version: &str, values_path: Option<&str>) -> V
     argv
 }
 
+// ---------------------------------------------------------------------------
+// Values safety gate — deep-layer port of the frontend's isSafeHelmValues
+// ---------------------------------------------------------------------------
+
+/// The compiled dangerous-values patterns, built once. They mirror
+/// `frontend/src/lib/security.ts::isSafeHelmValues` exactly:
+/// `\{\{.*?\}\}` (go-template) and `` `[^`]*` `` (backtick command
+/// substitution). Rust regex `.` excludes `\n` just like the JS engine's
+/// non-`s` flag, so multi-line semantics match the frontend check for free.
+fn unsafe_values_patterns() -> &'static [k7s_deps::regex::Regex; 2] {
+    static PATTERNS: OnceLock<[k7s_deps::regex::Regex; 2]> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            k7s_deps::regex::Regex::new(r"\{\{.*?\}\}").expect("static regex must compile"),
+            k7s_deps::regex::Regex::new(r"`[^`]*`").expect("static regex must compile"),
+        ]
+    })
+}
+
+/// True when `values` is safe to hand to helm as user overrides. Parity with
+/// the frontend's `isSafeHelmValues`: empty/whitespace-only is ok; go-template
+/// `{{ … }}` and backtick command substitution are rejected. Living here
+/// (not in the transports) means one gate covers desktop, web and MCP
+/// uniformly — a non-browser client cannot skip it the way it could skip a
+/// frontend-only check.
+pub fn is_safe_values(values: &str) -> bool {
+    if values.trim().is_empty() {
+        return true; // empty is ok — helm renders chart defaults
+    }
+    !unsafe_values_patterns()
+        .iter()
+        .any(|re| re.is_match(values))
+}
+
 /// Render a chart's templates to a manifest string (offline `helm template`,
 /// no cluster contact, nothing applied). `chart_ref` may be `repo/name`, an
 /// OCI URL, or a local absolute path — helm natively accepts all three.
 /// `version` empty = latest; `values` empty = chart defaults, otherwise the
-/// content lands in a guarded 0600 temp file; `kubeconfig` `Some` = temp file
+/// content must pass the [`is_safe_values`] gate (rejected otherwise) and
+/// lands in a guarded 0600 temp file; `kubeconfig` `Some` = temp file
 /// passed via `--kubeconfig` (helm needs a path, not a blob). Captures (not
 /// streams) the output; a non-zero exit is an `AppError::Other` carrying
 /// helm's stderr.
@@ -736,6 +772,17 @@ pub async fn render_chart_templates(
     values: &str,
     kubeconfig: Option<&str>,
 ) -> AppResult<String> {
+    // Deep-layer values gate, before the helm lookup: one check here covers
+    // desktop, web and MCP uniformly (the frontend gate can be bypassed by
+    // any non-browser client), and the policy error is testable without a
+    // helm binary.
+    if !is_safe_values(values) {
+        return Err(AppError::Other(
+            "values contain go-template or command-substitution patterns — rejected by safety policy"
+                .into(),
+        ));
+    }
+
     let helm = which_helm().ok_or_else(|| {
         AppError::Other(
             "helm CLI not found in PATH — install Helm 3+ (https://helm.sh/docs/intro/install/) and retry"
@@ -1137,5 +1184,44 @@ mod tests {
             "appVersion must be camelCase"
         );
         assert!(v.get("app_version").is_none());
+    }
+
+    // ---- values safety gate (parity with the frontend's isSafeHelmValues) ----
+
+    /// The Rust predicate must behave exactly like
+    /// `frontend/src/lib/security.ts::isSafeHelmValues`: empty (and
+    /// whitespace-only) values pass, go-template `{{ … }}` and backtick
+    /// command substitution are rejected, and — because `.` excludes `\n`
+    /// in both engines — a template brace pair spanning a newline does NOT
+    /// match, exactly as the JS regex sees it.
+    #[test]
+    fn is_safe_values_matches_frontend_policy() {
+        // clean / empty / whitespace-only pass
+        assert!(is_safe_values(""));
+        assert!(is_safe_values("   \n\t"));
+        assert!(is_safe_values("replicaCount: 2\nimage: nginx\n"));
+        // go-template injection rejected
+        assert!(!is_safe_values("command: {{ .Values.foo }}"));
+        assert!(!is_safe_values("a: {{x}}"));
+        // backtick command substitution rejected
+        assert!(!is_safe_values("run: `id`"));
+        assert!(!is_safe_values("pre`whoami`post"));
+        // multi-line `{{\n}}` is ok — same as the JS regex (no `s` flag)
+        assert!(is_safe_values("a: {{\nb}}\n"));
+    }
+
+    /// The values gate sits BEFORE the helm-CLI lookup, so an unsafe payload
+    /// gets the policy error deterministically — testable on hosts without
+    /// helm, and the same guarantee holds for every transport (desktop, web
+    /// API, MCP) since they all funnel into this one render entry.
+    #[k7s_deps::tokio::test]
+    async fn render_chart_templates_rejects_unsafe_values_before_helm() {
+        let err = render_chart_templates("repo/app", "", "cmd: {{ .Values.x }}", None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("rejected by safety policy"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -169,7 +169,7 @@ pub async fn run_op(op: HelmOp, sink: EventSink) -> AppResult<HelmOpResult> {
     // Detect helm up front. `which("helm")` is the right cross-platform check.
     let helm_path = which_helm().ok_or_else(|| {
         AppError::Other(
-            "helm CLI not found in PATH — install Helm 3 (https://helm.sh/docs/intro/install/) and retry"
+            "helm CLI not found in PATH — install Helm 3+ (https://helm.sh/docs/intro/install/) and retry"
                 .into(),
         )
     })?;
@@ -738,7 +738,7 @@ pub async fn render_chart_templates(
 ) -> AppResult<String> {
     let helm = which_helm().ok_or_else(|| {
         AppError::Other(
-            "helm CLI not found in PATH — install Helm 3 (https://helm.sh/docs/intro/install/) and retry"
+            "helm CLI not found in PATH — install Helm 3+ (https://helm.sh/docs/intro/install/) and retry"
                 .into(),
         )
     })?;
@@ -790,7 +790,7 @@ pub async fn render_chart_templates(
 pub(crate) async fn helm_capture(args: Vec<String>, kubeconfig: Option<&str>) -> AppResult<String> {
     let helm = which_helm().ok_or_else(|| {
         AppError::Other(
-            "helm CLI not found in PATH — install Helm 3 (https://helm.sh/docs/intro/install/) and retry"
+            "helm CLI not found in PATH — install Helm 3+ (https://helm.sh/docs/intro/install/) and retry"
                 .into(),
         )
     })?;
@@ -812,12 +812,26 @@ pub(crate) async fn helm_capture(args: Vec<String>, kubeconfig: Option<&str>) ->
         .await
         .map_err(|e| AppError::Other(format!("helm {label}: {e}")))?;
     if !out.status.success() {
-        return Err(AppError::Other(format!(
-            "helm {label}: {}",
-            String::from_utf8_lossy(&out.stderr)
+        return Err(AppError::Other(capture_failure_message(
+            label,
+            &String::from_utf8_lossy(&out.stderr),
+            &String::from_utf8_lossy(&out.stdout),
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Build the failure message for [`helm_capture`]. helm doesn't route all
+/// failure detail to stderr — `helm lint` on a broken chart prints the
+/// actionable `[ERROR] …` lines on stdout and only the summary on stderr —
+/// so a non-empty stdout is appended instead of being dropped.
+fn capture_failure_message(label: &str, stderr: &str, stdout: &str) -> String {
+    let mut msg = format!("helm {label}: {stderr}");
+    if !stdout.trim().is_empty() {
+        msg.push('\n');
+        msg.push_str(stdout);
+    }
+    msg
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +857,31 @@ mod tests {
             atomic: false,
             timeout_secs: None,
         }
+    }
+
+    /// `helm lint` on a broken chart prints the actionable `[ERROR] …` lines
+    /// on stdout and only the summary on stderr (exit 1) — the failure message
+    /// must keep both parts. Regression: stdout used to be dropped, leaving
+    /// the UI/MCP with a detail-free summary. (Pure-formatting helper test:
+    /// `helm_capture` itself spawns a real helm process, so the behaviour is
+    /// pinned here rather than via a live subprocess.)
+    #[test]
+    fn capture_failure_message_keeps_stdout_detail() {
+        // Both streams non-empty — the common `helm lint` failure shape.
+        let msg = capture_failure_message(
+            "lint",
+            "[INFO] Chart.yaml: icon is recommended, 1 chart(s) failed",
+            "[ERROR] templates/deployment.yaml: missing required value\n",
+        );
+        assert!(msg.starts_with("helm lint: [INFO] Chart.yaml"));
+        assert!(msg.contains("[ERROR] templates/deployment.yaml"));
+        // stdout is appended on its own line after stderr.
+        let (_, stdout_part) = msg.split_once('\n').expect("newline separator");
+        assert!(stdout_part.starts_with("[ERROR] templates/deployment.yaml"));
+
+        // stderr-only failure (empty stdout) stays unchanged, no stray newline.
+        let msg = capture_failure_message("verify", "could not load provenance file\n", "");
+        assert_eq!(msg, "helm verify: could not load provenance file\n");
     }
 
     /// `--keep-history` must appear only when the user asked to keep it:

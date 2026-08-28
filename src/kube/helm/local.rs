@@ -550,6 +550,38 @@ pub fn local_chart_file(root: &Path, id: &str, inner_path: &str) -> AppResult<St
     }
 }
 
+/// Build the argv for `helm lint <path>`. Pure (template_argv-style) so the
+/// command shape is unit-testable without a helm binary.
+fn lint_argv(path: &Path) -> Vec<String> {
+    vec!["lint".into(), path.display().to_string()]
+}
+
+/// Build the argv for `helm verify <path>`. Same purity rule as [`lint_argv`].
+fn verify_argv(path: &Path) -> Vec<String> {
+    vec!["verify".into(), path.display().to_string()]
+}
+
+/// Run `helm lint` on a chart from the local library and return the report.
+/// Lint is a fully offline operation — no cluster contact — so no kubeconfig
+/// is involved.
+pub async fn lint_chart(root: &Path, id: &str) -> AppResult<String> {
+    let (path, _entry) = resolve(root, id)?;
+    super::ops::helm_capture(lint_argv(&path), None).await
+}
+
+/// Run `helm verify` on a chart from the local library and return the
+/// report. Verify inspects a packaged archive's provenance, so an unpacked
+/// dir chart is refused before any helm invocation.
+pub async fn verify_chart(root: &Path, id: &str) -> AppResult<String> {
+    let (path, entry) = resolve(root, id)?;
+    if entry.kind == LocalChartKind::Dir {
+        return Err(AppError::Other(
+            "verify requires a packaged chart (.tgz)".into(),
+        ));
+    }
+    super::ops::helm_capture(verify_argv(&path), None).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +793,71 @@ mod tests {
         // Reading through a symlinked member is refused by the confinement
         // guard (canonicalised target escapes the chart dir).
         assert!(local_chart_file(&tmp, "my-chart", "outside/hosts").is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- helm lint / verify (ChartOps P2) ----
+
+    /// The argv builders produce helm's exact positional form —
+    /// `helm lint <path>` / `helm verify <path>`, no flags, nothing else.
+    /// Keeping these pure means the command shape is pinned without a helm
+    /// binary in the test environment.
+    #[test]
+    fn lint_and_verify_argv_are_exact() {
+        let p = Path::new("/data/charts/demo-1.0.0.tgz");
+        assert_eq!(
+            lint_argv(p),
+            vec![
+                "lint".to_string(),
+                "/data/charts/demo-1.0.0.tgz".to_string()
+            ]
+        );
+        assert_eq!(
+            verify_argv(p),
+            vec![
+                "verify".to_string(),
+                "/data/charts/demo-1.0.0.tgz".to_string()
+            ]
+        );
+    }
+
+    /// `helm verify` inspects a packaged archive's provenance — there is
+    /// nothing to verify on an unpacked dir chart, so the request is
+    /// refused *before* any helm invocation (deterministic error, no helm
+    /// binary needed to test it).
+    #[k7s_deps::tokio::test]
+    async fn verify_chart_refuses_dir_charts() {
+        let tmp = std::env::temp_dir().join(format!("k7s-verify-dir-{}", std::process::id()));
+        let dir = tmp.join("my-chart");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: my-chart\nversion: 1.0.0\n",
+        )
+        .unwrap();
+
+        let err = verify_chart(&tmp, "my-chart").await.unwrap_err();
+        assert!(
+            err.to_string().contains("requires a packaged chart"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Both commands resolve ids through the scan listing: an unknown id is
+    /// a NotFound from `resolve`, again before any helm invocation.
+    #[k7s_deps::tokio::test]
+    async fn lint_and_verify_unknown_id_is_not_found() {
+        let tmp = std::env::temp_dir().join(format!("k7s-lint-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(matches!(
+            lint_chart(&tmp, "nope").await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+        assert!(matches!(
+            verify_chart(&tmp, "nope").await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

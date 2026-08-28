@@ -775,6 +775,51 @@ pub async fn render_chart_templates(
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Run a helm subcommand whose output is worth capturing (`lint`, `verify`,
+/// and future offline one-shots) and return its stdout. `which_helm` gates
+/// the call; `kubeconfig` `Some` lands in a guarded 0600 temp file passed
+/// via `--kubeconfig` (same pattern as [`render_chart_templates`] — helm
+/// needs a path, not a blob); a non-zero exit is an `AppError::Other`
+/// carrying helm's stderr.
+///
+/// Unlike `run_op` there is no event streaming — callers get the whole
+/// output at once, so this suits short read-only operations rather than
+/// long installs. Takes ready-made args (template_argv-style purity): the
+/// per-feature argv builders live next to their features and stay
+/// unit-testable without a helm binary.
+pub(crate) async fn helm_capture(args: Vec<String>, kubeconfig: Option<&str>) -> AppResult<String> {
+    let helm = which_helm().ok_or_else(|| {
+        AppError::Other(
+            "helm CLI not found in PATH — install Helm 3 (https://helm.sh/docs/intro/install/) and retry"
+                .into(),
+        )
+    })?;
+    // Guard must outlive `cmd.output()` below — helm reads the kubeconfig
+    // while the process runs; it drops (deleting the file) after the result.
+    let kc_guard = kubeconfig.map(write_temp_kubeconfig).transpose()?;
+
+    let mut cmd = Command::new(&helm);
+    cmd.args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(g) = &kc_guard {
+        cmd.arg("--kubeconfig").arg(g.path());
+    }
+    // Name the subcommand in errors ("helm lint: …") so a failure says what ran.
+    let label = args.first().map(String::as_str).unwrap_or("helm");
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| AppError::Other(format!("helm {label}: {e}")))?;
+    if !out.status.success() {
+        return Err(AppError::Other(format!(
+            "helm {label}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

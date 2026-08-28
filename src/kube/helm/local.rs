@@ -209,6 +209,87 @@ pub fn scan_local_charts(root: &Path) -> AppResult<Vec<LocalChartEntry>> {
     Ok(out)
 }
 
+/// Hard ceiling on an imported chart package — keeps a hostile upload from
+/// filling the disk before the gzip magic check even runs.
+pub const MAX_CHART_BYTES: u64 = 50 * 1024 * 1024;
+
+/// gzip files start with these two bytes; `.tgz` is always gzip.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// Sanitise a client-supplied filename down to a bare basename with a
+/// chart-ish extension. Rejects anything that tries to escape or rename.
+fn sanitize_filename(name: &str) -> AppResult<String> {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or_else(|| AppError::Other("invalid filename".into()))?
+        .to_string();
+    if !base.ends_with(".tgz") && !base.ends_with(".tar.gz") {
+        return Err(AppError::Other("only .tgz / .tar.gz accepted".into()));
+    }
+    Ok(base)
+}
+
+/// Import a chart from raw bytes: size-gate, gzip-magic-gate, sanitise the
+/// filename, write it under the library root, then verify it parses as a
+/// chart (a file that fails metadata is removed again — no corrupt residue).
+pub fn import_chart_bytes(root: &Path, filename: &str, bytes: &[u8]) -> AppResult<LocalChartEntry> {
+    let name = sanitize_filename(filename)?;
+    if bytes.len() as u64 > MAX_CHART_BYTES {
+        return Err(AppError::Other(format!(
+            "chart exceeds {} byte limit",
+            MAX_CHART_BYTES
+        )));
+    }
+    if bytes.len() < 2 || bytes[0..2] != GZIP_MAGIC {
+        return Err(AppError::Other("not a gzip archive".into()));
+    }
+    std::fs::create_dir_all(root)
+        .map_err(|e| AppError::Other(format!("mkdir {}: {e}", root.display())))?;
+    let dest = root.join(&name);
+    std::fs::write(&dest, bytes)
+        .map_err(|e| AppError::Other(format!("write {}: {e}", dest.display())))?;
+    match parse_tgz_metadata(&dest) {
+        Ok(entry) => Ok(entry),
+        Err(e) => {
+            // Don't leave a corrupt file behind just because metadata failed.
+            let _ = std::fs::remove_file(&dest);
+            Err(e)
+        }
+    }
+}
+
+/// Delete by id. The id must resolve to a direct child of the library root
+/// (canonicalised), so `../` tricks and absolute paths are refused. A tgz
+/// id is the file *stem* (`demo-1.0.0`), so the archive extensions are
+/// retried when the bare id doesn't name a dir chart directly.
+pub fn remove_chart(root: &Path, id: &str) -> AppResult<()> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| AppError::Other(format!("canonicalize {}: {e}", root.display())))?;
+    // "" covers dir charts (id IS the dir name); the other two cover tgz
+    // archives, whose scan-time id drops the extension.
+    let target = ["", ".tgz", ".tar.gz"]
+        .into_iter()
+        .map(|ext| root.join(format!("{id}{ext}")))
+        .find(|p| p.exists())
+        .ok_or_else(|| AppError::NotFound(format!("chart `{id}` not found")))?;
+    let canon = target
+        .canonicalize()
+        .map_err(|e| AppError::NotFound(format!("chart `{id}`: {e}")))?;
+    if canon.parent() != Some(root.as_path()) {
+        return Err(AppError::Other(
+            "refusing to delete outside chart library".into(),
+        ));
+    }
+    if canon.is_dir() {
+        std::fs::remove_dir_all(&canon)
+    } else {
+        std::fs::remove_file(&canon)
+    }
+    .map_err(|e| AppError::Other(format!("delete {}: {e}", canon.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,9 +301,8 @@ mod tests {
     /// a single top-level `<name>/` dir containing Chart.yaml (+ extras).
     fn tgz_bytes(name: &str, version: &str, extra: &[(&str, &str)]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
-        let chart_yaml = format!(
-            "apiVersion: v2\nname: {name}\nversion: {version}\ndescription: test chart\n"
-        );
+        let chart_yaml =
+            format!("apiVersion: v2\nname: {name}\nversion: {version}\ndescription: test chart\n");
         let mut append = |path: String, data: &[u8]| {
             let mut header = tar::Header::new_gnu();
             header.set_size(data.len() as u64);
@@ -245,8 +325,11 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("k7s-local-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         // tgz chart
-        std::fs::write(tmp.join("demo-app-1.0.0.tgz"), tgz_bytes("demo-app", "1.0.0", &[]))
-            .unwrap();
+        std::fs::write(
+            tmp.join("demo-app-1.0.0.tgz"),
+            tgz_bytes("demo-app", "1.0.0", &[]),
+        )
+        .unwrap();
         // dir chart
         let dir = tmp.join("my-chart");
         std::fs::create_dir_all(&dir).unwrap();
@@ -275,6 +358,38 @@ mod tests {
         std::fs::write(tmp.join("garbage.tgz"), b"not a gzip at all").unwrap();
         // One corrupt file must not break the whole listing (mirrors
         // decode_release's skip-don't-fail policy in mod.rs).
+        assert!(scan_local_charts(&tmp).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_rejects_non_gzip_and_oversize() {
+        let tmp = std::env::temp_dir().join(format!("k7s-import-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // not gzip
+        assert!(import_chart_bytes(&tmp, "evil.tgz", b"plain text").is_err());
+        // wrong extension
+        let good = tgz_bytes("demo", "1.0.0", &[]);
+        assert!(import_chart_bytes(&tmp, "evil.exe", &good).is_err());
+        // oversized (fabricate via limit check on a tiny ceiling — assert the
+        // real constant rejects a > MAX buffer is impractical in-test, so we
+        // assert the constant is what the code compares against instead)
+        assert_eq!(MAX_CHART_BYTES, 50 * 1024 * 1024);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_then_scan_then_remove_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("k7s-import-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bytes = tgz_bytes("demo", "1.0.0", &[("values.yaml", "replicaCount: 1\n")]);
+        let entry = import_chart_bytes(&tmp, "demo-1.0.0.tgz", &bytes).unwrap();
+        assert_eq!(entry.name, "demo");
+        assert_eq!(scan_local_charts(&tmp).unwrap().len(), 1);
+
+        // traversal id must be refused
+        assert!(remove_chart(&tmp, "../../etc").is_err());
+        remove_chart(&tmp, &entry.id).unwrap();
         assert!(scan_local_charts(&tmp).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }

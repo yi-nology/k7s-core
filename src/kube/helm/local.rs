@@ -582,6 +582,79 @@ pub async fn verify_chart(root: &Path, id: &str) -> AppResult<String> {
     super::ops::helm_capture(verify_argv(&path), None).await
 }
 
+/// Which `helm dependency` subcommand to run. The wire form is the bare
+/// lowercase verb (serde) — the frontend sends `"build"`, not `"Build"`.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DepsAction {
+    List,
+    Build,
+    Update,
+}
+
+/// Build the argv for `helm package <dir> --destination <dest>`. Pure
+/// (template_argv-style) so the command shape is unit-testable without a
+/// helm binary.
+fn package_argv(dir: &Path, dest: &Path) -> Vec<String> {
+    vec![
+        "package".into(),
+        dir.display().to_string(),
+        "--destination".into(),
+        dest.display().to_string(),
+    ]
+}
+
+/// Build the argv for `helm dependency <list|build|update> <path>`. Same
+/// purity rule as [`package_argv`].
+fn deps_argv(path: &Path, action: DepsAction) -> Vec<String> {
+    let sub = match action {
+        DepsAction::List => "list",
+        DepsAction::Build => "build",
+        DepsAction::Update => "update",
+    };
+    vec!["dependency".into(), sub.into(), path.display().to_string()]
+}
+
+/// Package an unpacked dir chart from the library with `helm package`,
+/// writing `<root>/<name>-<version>.tgz`, and return the fresh archive's
+/// entry. A chart that is already a `.tgz` is refused — there is nothing
+/// to package. On success the library is re-scanned and the newest tgz
+/// matching the chart's name is returned; a package run that produced no
+/// readable archive is an error (helm failed silently, or wrote something
+/// we cannot parse — either way the caller must not show a stale entry).
+///
+/// NOTE: this shells out to the helm binary; there is no in-process
+/// fallback, mirroring lint/verify.
+pub async fn package_chart(root: &Path, id: &str) -> AppResult<LocalChartEntry> {
+    let (path, entry) = resolve(root, id)?;
+    if entry.kind == LocalChartKind::Tgz {
+        return Err(AppError::Other("chart is already packaged".into()));
+    }
+    super::ops::helm_capture(package_argv(&path, root), None).await?;
+    // `helm package` prints the produced path, but parsing CLI output for a
+    // filename is brittle; the re-scan is the same source of truth the
+    // listing uses. It sorts newest-first, so the first name match is the
+    // archive helm just wrote (an older tgz of the same chart loses).
+    scan_local_charts(root)?
+        .into_iter()
+        .find(|e| e.kind == LocalChartKind::Tgz && e.name == entry.name)
+        .ok_or_else(|| {
+            AppError::Other(format!(
+                "helm package produced no readable archive for `{}`",
+                entry.name
+            ))
+        })
+}
+
+/// Run `helm dependency list|build|update` on a chart from the local
+/// library and return the report. `List` is read-only; `Build`/`Update`
+/// write Chart.lock and populate the charts/ cache inside the chart dir —
+/// the command layer audits those two, like every other mutating op.
+pub async fn chart_deps(root: &Path, id: &str, action: DepsAction) -> AppResult<String> {
+    let (path, _entry) = resolve(root, id)?;
+    super::ops::helm_capture(deps_argv(&path, action), None).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +933,112 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// `helm package <dir> --destination <root>` and
+    /// `helm dependency <list|build|update> <path>`: exact positional argv,
+    /// pinned without a helm binary in the test environment.
+    #[test]
+    fn package_and_deps_argv_are_exact() {
+        let dir = Path::new("/data/charts/my-chart");
+        let dest = Path::new("/data/charts");
+        assert_eq!(
+            package_argv(dir, dest),
+            vec![
+                "package".to_string(),
+                "/data/charts/my-chart".to_string(),
+                "--destination".to_string(),
+                "/data/charts".to_string(),
+            ]
+        );
+        let p = Path::new("/data/charts/demo-1.0.0.tgz");
+        assert_eq!(
+            deps_argv(p, DepsAction::List),
+            vec![
+                "dependency".to_string(),
+                "list".to_string(),
+                "/data/charts/demo-1.0.0.tgz".to_string()
+            ]
+        );
+        assert_eq!(
+            deps_argv(p, DepsAction::Build),
+            vec![
+                "dependency".to_string(),
+                "build".to_string(),
+                "/data/charts/demo-1.0.0.tgz".to_string()
+            ]
+        );
+        assert_eq!(
+            deps_argv(p, DepsAction::Update),
+            vec![
+                "dependency".to_string(),
+                "update".to_string(),
+                "/data/charts/demo-1.0.0.tgz".to_string()
+            ]
+        );
+    }
+
+    /// The wire form of a deps action is the bare lowercase verb — the
+    /// frontend sends `"build"`, not `"Build"`. An unknown verb must be
+    /// rejected, not silently mapped to some default (a typo'd `"updata"`
+    /// mutating the chart lock would be a nasty surprise).
+    #[test]
+    fn deps_action_serde_roundtrip_is_lowercase() {
+        for (wire, expected) in [
+            ("list", DepsAction::List),
+            ("build", DepsAction::Build),
+            ("update", DepsAction::Update),
+        ] {
+            let parsed: DepsAction = k7s_deps::serde_json::from_str(&format!("\"{wire}\""))
+                .unwrap_or_else(|e| panic!("{wire} must deserialize: {e}"));
+            assert_eq!(parsed, expected);
+            assert_eq!(
+                k7s_deps::serde_json::to_string(&parsed).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+        assert!(k7s_deps::serde_json::from_str::<DepsAction>("\"frobnicate\"").is_err());
+    }
+
+    /// `helm package` packages an unpacked dir; a `.tgz` is already the
+    /// finished artefact, so the request is refused *before* any helm
+    /// invocation (deterministic error, no helm binary needed).
+    #[k7s_deps::tokio::test]
+    async fn package_chart_refuses_already_packaged() {
+        let tmp = std::env::temp_dir().join(format!("k7s-package-tgz-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let bytes = tgz_bytes("demo", "1.0.0", &[]);
+        let entry = import_chart_bytes(&tmp, "demo-1.0.0.tgz", &bytes).unwrap();
+        let err = package_chart(&tmp, &entry.id).await.unwrap_err();
+        assert!(
+            err.to_string().contains("already packaged"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Both commands resolve ids through the scan listing: an unknown id is
+    /// a NotFound from `resolve`, again before any helm invocation.
+    #[k7s_deps::tokio::test]
+    async fn package_and_deps_unknown_id_is_not_found() {
+        let tmp = std::env::temp_dir().join(format!("k7s-package-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(matches!(
+            package_chart(&tmp, "nope").await.unwrap_err(),
+            AppError::NotFound(_)
+        ));
+        assert!(matches!(
+            chart_deps(&tmp, "nope", DepsAction::List)
+                .await
+                .unwrap_err(),
+            AppError::NotFound(_)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The happy path of `package_chart` spawns the real `helm` binary, so it
+    // cannot run in a test environment without helm installed — like the
+    // lint/verify success paths, it is covered by the argv pins above plus
+    // manual verification against a live helm.
 
     #[test]
     fn import_tar_gz_roundtrips_through_scan() {

@@ -1,6 +1,6 @@
 [package]
 name = "k7s-core"
-version = "0.7.1"
+version = "0.7.2"
 description = "k7s core — transport-agnostic Kubernetes business logic"
 authors = ["k7s"]
 edition = "2021"

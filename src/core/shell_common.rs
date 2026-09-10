@@ -350,6 +350,7 @@ pub async fn merged_contexts(manager: &ClientManager) -> Vec<crate::kube::client
                 name,
                 cluster: imp.cluster,
                 current: false,
+                imported: true,
             });
         }
     }

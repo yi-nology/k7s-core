@@ -18,6 +18,11 @@ pub struct ContextInfo {
     pub cluster: String,
     /// True for the kubeconfig's current-context.
     pub current: bool,
+    /// True for contexts registered through the web shell's paste/import —
+    /// those live only in the manager and can be removed at runtime.
+    /// Kubeconfig-file contexts belong to the operator's file and can't.
+    #[serde(default)]
+    pub imported: bool,
 }
 
 /// Result of a successful connect.
@@ -61,6 +66,7 @@ pub fn list_contexts() -> AppResult<Vec<ContextInfo>> {
                 name: ctx.name.clone(),
                 cluster,
                 current: ctx.name == current,
+                imported: false,
             }
         })
         .collect();
@@ -90,6 +96,7 @@ pub fn contexts_from_kubeconfig(kubeconfig: &Kubeconfig) -> Vec<ContextInfo> {
                 name: ctx.name.clone(),
                 cluster,
                 current: false,
+                imported: false,
             }
         })
         .collect()

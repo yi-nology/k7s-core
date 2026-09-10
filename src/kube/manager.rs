@@ -150,6 +150,14 @@ impl ClientManager {
         self.imports.write().await.insert(name, imported);
     }
 
+    /// Drop an imported context registration (the web switcher's remove
+    /// action). Returns the removed entry, or `None` when the context wasn't
+    /// imported — kubeconfig-file contexts belong to the operator's file and
+    /// can't be removed from here.
+    pub async fn remove_import(&self, name: &str) -> Option<ImportedContext> {
+        self.imports.write().await.remove(name)
+    }
+
     /// The source file for an imported context, if it was imported.
     pub async fn import_path(&self, context: &str) -> Option<String> {
         self.imports

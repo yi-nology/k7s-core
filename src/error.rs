@@ -30,6 +30,11 @@ pub enum AppError {
     #[error("not connected to a cluster")]
     Disconnected,
 
+    /// The caller acted on a connection that is no longer the active one
+    /// (another web session switched the shared manager's cluster).
+    #[error("{0}")]
+    Conflict(String),
+
     /// YAML (de)serialization failed while reading or applying a manifest.
     #[error("yaml error: {0}")]
     Yaml(String),

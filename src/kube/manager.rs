@@ -95,6 +95,8 @@ struct Inner {
     /// Node-exporter scrapers, keyed by node name (B27). Same lifetime rule as
     /// custom watchers: one runs only while its node's Metrics tab is open.
     node_scrapers: HashMap<String, JoinHandle<()>>,
+    /// Monotonic connection id, bumped on every `set_connected` / `reset`.
+    epoch: u64,
 }
 
 /// A context imported from a non-default kubeconfig file: its source path and the
@@ -200,6 +202,11 @@ impl ClientManager {
         self.inner.read().await.connection.clone()
     }
 
+    /// Monotonic id of the current connection (0 = never connected).
+    pub async fn connection_epoch(&self) -> u64 {
+        self.inner.read().await.epoch
+    }
+
     /// Number of resource watchers running for the current connection. Zero
     /// when disconnected. Used by the sidebar footer (k7s) and by
     /// `GET /api/status` (web shell).
@@ -240,6 +247,8 @@ impl ClientManager {
         // status endpoint: `connected: true` only when both are present.
         inner.connection = None;
         inner.watcher_count = 0;
+        // A disconnect is a new connection identity.
+        inner.epoch += 1;
         drop(inner);
         self.emit_watch().await;
         // Forwards are gone with the connection; tell the strip so it empties.
@@ -250,13 +259,23 @@ impl ClientManager {
     /// via [`push_task`]; `watcher_count` is the number of kinds being watched,
     /// used for the sidebar footer. `info` is what `GET /api/status` returns
     /// to identify the cluster to the user.
-    pub async fn set_connected(&self, client: Client, info: ConnectionInfo, watcher_count: usize) {
+    ///
+    /// Returns the connection's epoch, handed to the front-end by `connect`.
+    pub async fn set_connected(
+        &self,
+        client: Client,
+        info: ConnectionInfo,
+        watcher_count: usize,
+    ) -> u64 {
         let mut inner = self.inner.write().await;
         inner.client = Some(client);
         inner.connection = Some(info);
         inner.watcher_count = watcher_count;
+        inner.epoch += 1;
+        let epoch = inner.epoch;
         drop(inner);
         self.emit_watch().await;
+        epoch
     }
 
     /// Register a connection-scoped background task so it is aborted on reset.

@@ -96,6 +96,10 @@ struct ClusterStatusPayload {
     /// null (None) when metrics are unavailable.
     cpu_percent: Option<f64>,
     mem_percent: Option<f64>,
+    /// Connection this status belongs to: the front-end drops events from
+    /// another connection, and a newer epoch flags a backend switch.
+    context: String,
+    epoch: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,11 +142,14 @@ pub struct NodeMetric {
 type SharedClusterPct = Arc<Mutex<Option<(f64, f64)>>>;
 
 /// Spawn the metrics + status pollers, returning their join handles for the
-/// manager to register (and abort on disconnect).
+/// manager to register (and abort on disconnect). `context`/`epoch` tag every
+/// emitted status with the connection the pollers belong to.
 pub fn spawn_pollers(
     sink: EventSink,
     client: Client,
     intervals: PollIntervals,
+    context: String,
+    epoch: u64,
 ) -> (
     k7s_deps::tokio::task::JoinHandle<()>,
     k7s_deps::tokio::task::JoinHandle<()>,
@@ -155,7 +162,14 @@ pub fn spawn_pollers(
         shared.clone(),
         intervals.metrics,
     ));
-    let status_task = k7s_deps::tokio::spawn(status_loop(sink, client, shared, intervals.status));
+    let status_task = k7s_deps::tokio::spawn(status_loop(
+        sink,
+        client,
+        shared,
+        intervals.status,
+        context,
+        epoch,
+    ));
     (metrics_task, status_task)
 }
 
@@ -284,7 +298,16 @@ async fn fetch_node_metrics(
 }
 
 /// Poll cluster status on an interval: version, latency, nodes ready, cpu/mem %.
-async fn status_loop(sink: EventSink, client: Client, shared: SharedClusterPct, every: Duration) {
+/// `context`/`epoch` are snapshotted at spawn, so an in-flight tick still
+/// describes its own connection after a switch.
+async fn status_loop(
+    sink: EventSink,
+    client: Client,
+    shared: SharedClusterPct,
+    every: Duration,
+    context: String,
+    epoch: u64,
+) {
     let mut tick = interval(every);
     loop {
         tick.tick().await;
@@ -322,6 +345,8 @@ async fn status_loop(sink: EventSink, client: Client, shared: SharedClusterPct, 
             nodes_total: total,
             cpu_percent: cpu,
             mem_percent: mem,
+            context: context.clone(),
+            epoch,
         };
         sink.emit(events::CLUSTER_STATUS, &payload);
     }

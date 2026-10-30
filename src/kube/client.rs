@@ -35,6 +35,9 @@ pub struct ClusterInfo {
     pub server: String,
     /// Server git version (e.g. "v1.31.2").
     pub version: String,
+    /// Epoch of the connection this response established; the front-end echoes
+    /// it on mutations (stale-connection guard).
+    pub connection_epoch: u64,
 }
 
 /// Read the kubeconfig and list its contexts, flagging the current one.
